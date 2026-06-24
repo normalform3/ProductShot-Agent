@@ -30,15 +30,16 @@ defineProps<{
   gap: 0;
   overflow: hidden;
   padding: 0;
+  box-shadow: none;
 }
 
 .workflow-step {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 9px;
   align-items: start;
-  padding: 18px;
+  padding: 12px;
   border-right: 1px solid var(--ps-border);
 }
 
@@ -48,8 +49,8 @@ defineProps<{
 
 .step-index {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border: 1px solid var(--ps-border);
   border-radius: 999px;
@@ -79,7 +80,8 @@ defineProps<{
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14px;
+  min-width: 0;
+  font-size: 13px;
   font-weight: 800;
 }
 
@@ -92,17 +94,22 @@ p {
 
 @media (max-width: 1000px) {
   .workflow-stepper {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .workflow-step {
-    grid-template-columns: 42px minmax(0, 1fr);
     border-right: 0;
     border-bottom: 1px solid var(--ps-border);
   }
 
   .workflow-step:last-child {
     border-bottom: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .workflow-stepper {
+    grid-template-columns: 1fr;
   }
 }
 </style>

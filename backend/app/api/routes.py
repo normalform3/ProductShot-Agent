@@ -1,8 +1,14 @@
+from datetime import UTC, datetime
+from time import perf_counter
+
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session, selectinload
 
+from app.config import settings
 from app.database import get_db
-from app.models import CreativePlan, GeneratedImage, GenerationTask, ProductAsset, Project
+from app.models import CreativePlan, GeneratedImage, GenerationTask, ProductAsset, Project, WorkflowEvent
+from app.providers import get_text_provider
+from app.providers.text_provider import TextProviderError, TextProviderUnavailable
 from app.schemas import (
     CopywritingRead,
     CopywritingRequest,
@@ -11,6 +17,9 @@ from app.schemas import (
     GeneratedImageRead,
     GeneratedImagesResponse,
     ImageReviewRead,
+    ModelConnectionTestRead,
+    ModelSettingsRead,
+    ModelSettingsUpdate,
     ProductAnalysisRead,
     ProductAssetRead,
     ProjectCreate,
@@ -18,11 +27,15 @@ from app.schemas import (
     ProjectRead,
     RevisionRequest,
     RevisionResponse,
+    WorkflowEventRead,
 )
 from app.services import ProductShotWorkflow
 from app.storage import save_upload_file
 
 router = APIRouter(prefix="/api")
+
+TEXT_PROVIDERS = {"mock", "dashscope"}
+IMAGE_PROVIDERS = {"mock", "dashscope", "openai"}
 
 
 def get_project_or_404(db: Session, project_id: int) -> Project:
@@ -36,6 +49,7 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
             selectinload(Project.generated_images).selectinload(GeneratedImage.reviews),
             selectinload(Project.generated_images).selectinload(GeneratedImage.task).selectinload(GenerationTask.plan),
             selectinload(Project.copywriting_items),
+            selectinload(Project.workflow_events),
         )
         .filter(Project.id == project_id)
         .first()
@@ -43,6 +57,93 @@ def get_project_or_404(db: Session, project_id: int) -> Project:
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     return project
+
+
+@router.get("/model-settings", response_model=ModelSettingsRead)
+def get_model_settings() -> ModelSettingsRead:
+    return _model_settings_read()
+
+
+@router.put("/model-settings", response_model=ModelSettingsRead)
+def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsRead:
+    updates = payload.model_dump(exclude_unset=True)
+    if "text_provider" in updates:
+        value = updates["text_provider"].lower()
+        if value not in TEXT_PROVIDERS:
+            raise HTTPException(status_code=400, detail="不支持的文字模型 Provider")
+        settings.text_provider = value
+    if "image_provider" in updates:
+        value = updates["image_provider"].lower()
+        if value not in IMAGE_PROVIDERS:
+            raise HTTPException(status_code=400, detail="不支持的图片模型 Provider")
+        settings.image_provider = value
+    if "text_model" in updates and updates["text_model"]:
+        settings.text_model = updates["text_model"]
+    if "image_model" in updates and updates["image_model"]:
+        settings.dashscope_image_model = updates["image_model"]
+    if "dashscope_text_base_url" in updates and updates["dashscope_text_base_url"]:
+        settings.dashscope_text_base_url = updates["dashscope_text_base_url"].rstrip("/")
+    if "dashscope_image_generation_url" in updates and updates["dashscope_image_generation_url"]:
+        settings.dashscope_image_generation_url = updates["dashscope_image_generation_url"]
+    return _model_settings_read()
+
+
+@router.post("/model-settings/test-text", response_model=ModelConnectionTestRead)
+def test_text_model_connection() -> ModelConnectionTestRead:
+    provider = get_text_provider()
+    started = perf_counter()
+    checked_at = datetime.now(UTC).replace(tzinfo=None)
+    model = getattr(provider, "model", settings.text_model)
+    if provider.name == "mock":
+        return ModelConnectionTestRead(
+            provider=provider.name,
+            model=model,
+            status="success",
+            latency_ms=0,
+            message="Mock Provider 不需要外部 LLM 连接。",
+            checked_at=checked_at,
+        )
+
+    try:
+        result = provider.generate_json(
+            system_prompt="You are a connection test endpoint. Return a minimal JSON object.",
+            user_prompt='Return {"ok": true, "message": "connected"} as JSON.',
+            schema_name="ConnectionTest",
+            temperature=0,
+        )
+        ok = bool(result.get("ok", True))
+        status = "success" if ok else "failed"
+        message = str(result.get("message") or ("LLM 连接测试通过。" if ok else "LLM 返回了非成功结果。"))
+    except (TextProviderUnavailable, TextProviderError) as exc:
+        status = "failed"
+        message = str(exc)
+    except Exception as exc:
+        status = "failed"
+        message = f"LLM connection test failed: {exc}"
+
+    return ModelConnectionTestRead(
+        provider=provider.name,
+        model=model,
+        status=status,
+        latency_ms=max(0, int((perf_counter() - started) * 1000)),
+        message=message,
+        checked_at=checked_at,
+    )
+
+
+def _model_settings_read() -> ModelSettingsRead:
+    return ModelSettingsRead(
+        text_provider=settings.text_provider,
+        text_model=settings.text_model,
+        image_provider=settings.image_provider,
+        image_model=settings.dashscope_image_model,
+        dashscope_text_base_url=settings.dashscope_text_base_url,
+        dashscope_image_generation_url=settings.dashscope_image_generation_url,
+        dashscope_workspace_id_configured=bool(settings.dashscope_workspace_id),
+        dashscope_api_key_configured=bool(settings.dashscope_api_key),
+        available_text_providers=sorted(TEXT_PROVIDERS),
+        available_image_providers=sorted(IMAGE_PROVIDERS),
+    )
 
 
 @router.post("/projects", response_model=ProjectRead)
@@ -65,6 +166,13 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
     workflow = ProductShotWorkflow(db)
     latest_analysis = workflow.latest_analysis(project_id)
     latest_copy = project.copywriting_items[-1] if project.copywriting_items else None
+    workflow_events = (
+        db.query(WorkflowEvent)
+        .filter(WorkflowEvent.project_id == project_id)
+        .order_by(WorkflowEvent.started_at.desc(), WorkflowEvent.id.desc())
+        .limit(80)
+        .all()
+    )
     return ProjectDetail(
         **ProjectRead.model_validate(project).model_dump(),
         assets=[ProductAssetRead.model_validate(item) for item in project.assets],
@@ -72,6 +180,7 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
         creative_plans=[workflow.creative_plan_read(item) for item in project.creative_plans],
         generated_images=[GeneratedImageRead.model_validate(item) for item in project.generated_images],
         latest_copywriting=workflow.copywriting_read(latest_copy) if latest_copy else None,
+        workflow_events=[WorkflowEventRead.model_validate(item) for item in workflow_events],
     )
 
 

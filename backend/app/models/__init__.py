@@ -7,6 +7,7 @@ from app.models.entities import (
     ProductAnalysis,
     ProductAsset,
     Project,
+    WorkflowEvent,
 )
 
 __all__ = [
@@ -18,5 +19,5 @@ __all__ = [
     "GeneratedImage",
     "ImageReview",
     "Copywriting",
+    "WorkflowEvent",
 ]
-

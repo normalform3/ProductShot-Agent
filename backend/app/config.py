@@ -11,8 +11,21 @@ class Settings:
     generated_dir = upload_dir / "generated"
     database_url = os.getenv("DATABASE_URL", f"sqlite:///{data_dir / 'productshot.db'}")
     image_provider = os.getenv("IMAGE_PROVIDER", "mock").lower()
+    text_provider = os.getenv("TEXT_PROVIDER", "mock").lower()
+    text_model = os.getenv("TEXT_MODEL", "qwen3.7plus")
     openai_api_key = os.getenv("OPENAI_API_KEY")
     dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
+    dashscope_workspace_id = os.getenv("DASHSCOPE_WORKSPACE_ID")
+    dashscope_text_base_url = os.getenv(
+        "DASHSCOPE_TEXT_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    dashscope_image_model = os.getenv("DASHSCOPE_IMAGE_MODEL", "wan2.6-t2i")
+    dashscope_image_generation_url = os.getenv(
+        "DASHSCOPE_IMAGE_GENERATION_URL",
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+    )
+    model_request_timeout = float(os.getenv("MODEL_REQUEST_TIMEOUT", "60"))
     cors_origins = [
         origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
@@ -26,4 +39,3 @@ class Settings:
 
 
 settings = Settings()
-

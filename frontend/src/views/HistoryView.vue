@@ -6,7 +6,7 @@
         <h1 class="page-title">历史项目</h1>
         <p class="page-description">查看本地 SQLite 中保存的商品营销项目，继续编辑或查看生成结果。</p>
       </div>
-      <el-button class="orange-button" type="primary" @click="$router.push('/create')">创建项目</el-button>
+      <el-button class="orange-button" type="primary" @click="$router.push('/studio')">创建项目</el-button>
     </div>
 
     <div class="panel panel-pad">
@@ -30,8 +30,8 @@
         </el-table-column>
         <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
-            <el-button text type="primary" @click="$router.push(`/workflow/${row.id}`)">工作流</el-button>
-            <el-button text type="primary" @click="$router.push(`/results/${row.id}`)">结果</el-button>
+            <el-button text type="primary" @click="$router.push(`/studio/${row.id}`)">继续编辑</el-button>
+            <el-button text type="primary" @click="$router.push(`/studio/${row.id}`)">查看结果</el-button>
           </template>
         </el-table-column>
       </el-table>

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
@@ -10,7 +10,7 @@ from app.database import Base
 
 
 def utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Project(Base):
@@ -33,6 +33,7 @@ class Project(Base):
     generation_tasks: Mapped[list["GenerationTask"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     generated_images: Mapped[list["GeneratedImage"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     copywriting_items: Mapped[list["Copywriting"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    workflow_events: Mapped[list["WorkflowEvent"]] = relationship(cascade="all, delete-orphan", back_populates="project")
 
 
 class ProductAsset(Base):
@@ -152,3 +153,21 @@ class Copywriting(Base):
 
     project: Mapped[Project] = relationship(back_populates="copywriting_items")
     image: Mapped[Optional[GeneratedImage]] = relationship(back_populates="copywriting_items")
+
+
+class WorkflowEvent(Base):
+    __tablename__ = "workflow_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    step_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    agent_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    summary: Mapped[str] = mapped_column(String(300), nullable=False)
+    detail_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    project: Mapped[Project] = relationship(back_populates="workflow_events")

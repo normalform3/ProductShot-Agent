@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
+
+from app.agents.llm import generate_payload
 from app.models import Project
+from app.providers import TextProvider, get_text_provider
 from app.schemas import CopywritingPayload, CreativePlanPayload, ImageReviewPayload
 
 
 class CopywritingAgent:
     """Generates platform-ready copy that matches the selected concept and review."""
+
+    def __init__(self, text_provider: TextProvider | None = None) -> None:
+        self.text_provider = text_provider or get_text_provider()
 
     def run(
         self,
@@ -13,6 +20,34 @@ class CopywritingAgent:
         plan: CreativePlanPayload,
         review: ImageReviewPayload | None = None,
     ) -> CopywritingPayload:
+        model_payload = generate_payload(
+            provider=self.text_provider,
+            payload_type=CopywritingPayload,
+            system_prompt=(
+                "You are a Chinese ecommerce copywriter. Write concise, platform-ready copy "
+                "that avoids exaggerated or unverifiable claims."
+            ),
+            user_prompt=json.dumps(
+                {
+                    "project": {
+                        "product_name": project.product_name,
+                        "product_category": project.product_category,
+                        "core_selling_points": project.core_selling_points,
+                        "target_platform": project.target_platform,
+                        "target_audience": project.target_audience,
+                    },
+                    "plan": plan.model_dump(),
+                    "review": review.model_dump() if review else None,
+                    "required_fields": CopywritingPayload.model_json_schema(),
+                },
+                ensure_ascii=False,
+            ),
+            schema_name="CopywritingPayload",
+            temperature=0.6,
+        )
+        if model_payload is not None:
+            return model_payload
+
         selling_points = self._split_points(project.core_selling_points) or [
             plan.main_selling_point,
             "日常使用场景丰富",

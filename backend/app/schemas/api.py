@@ -172,6 +172,37 @@ class RevisionRequest(BaseModel):
     instruction: str = Field(min_length=1)
 
 
+class ModelSettingsRead(BaseModel):
+    text_provider: str
+    text_model: str
+    image_provider: str
+    image_model: str
+    dashscope_text_base_url: str
+    dashscope_image_generation_url: str
+    dashscope_workspace_id_configured: bool
+    dashscope_api_key_configured: bool
+    available_text_providers: list[str]
+    available_image_providers: list[str]
+
+
+class ModelSettingsUpdate(BaseModel):
+    text_provider: str | None = Field(default=None, max_length=40)
+    text_model: str | None = Field(default=None, max_length=120)
+    image_provider: str | None = Field(default=None, max_length=40)
+    image_model: str | None = Field(default=None, max_length=120)
+    dashscope_text_base_url: str | None = Field(default=None, max_length=300)
+    dashscope_image_generation_url: str | None = Field(default=None, max_length=300)
+
+
+class ModelConnectionTestRead(BaseModel):
+    provider: str
+    model: str
+    status: str
+    latency_ms: int
+    message: str
+    checked_at: datetime
+
+
 class RevisionResponse(BaseModel):
     revision_type: str
     target: str
@@ -181,12 +212,29 @@ class RevisionResponse(BaseModel):
     notes: str
 
 
+class WorkflowEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    step_key: str
+    agent_name: str
+    status: str
+    summary: str
+    detail_json: str
+    error_message: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    latency_ms: int | None
+
+
 class ProjectDetail(ProjectRead):
     assets: list[ProductAssetRead]
     latest_analysis: ProductAnalysisRead | None
     creative_plans: list[CreativePlanRead]
     generated_images: list[GeneratedImageRead]
     latest_copywriting: CopywritingRead | None
+    workflow_events: list[WorkflowEventRead]
 
 
 class ExportReport(BaseModel):

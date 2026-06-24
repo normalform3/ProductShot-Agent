@@ -1,49 +1,47 @@
 <template>
   <section class="page home-page">
-    <div class="page-header hero">
-      <div class="hero-copy">
+    <div class="home-console">
+      <section class="home-start panel panel-pad">
         <span class="eyebrow">ProductShot Agent</span>
-        <h1 class="page-title">上传一张商品图，生成一整套营销素材</h1>
+        <h1 class="page-title">商品素材生产工作台</h1>
         <p class="page-description">
-          ProductShot Agent 可以帮助小商家自动生成商品场景图、社媒封面、卖点文案和发布内容。
+          从一张商品原图出发，把分析、创意方案、图片生成、评分、文案和导出放在同一个连续工作区里。
         </p>
-        <div class="hero-actions">
-          <el-button class="orange-button" type="primary" size="large" @click="$router.push('/create')">
-            创建项目
+        <div class="home-actions">
+          <el-button class="orange-button" type="primary" size="large" @click="$router.push('/studio')">
+            新建项目
           </el-button>
-          <el-button size="large" @click="$router.push('/history')">查看历史项目</el-button>
+          <el-button size="large" :disabled="!recentProjects.length" @click="openLatestProject">
+            打开最近项目
+          </el-button>
         </div>
-      </div>
-      <div class="hero-preview">
-        <div class="studio-card panel">
-          <div class="studio-head">
-            <span class="metric-pill accent">Live Workflow</span>
-            <span class="muted">7 steps</span>
+      </section>
+
+      <aside class="home-side panel panel-pad">
+        <div class="section-head">
+          <div>
+            <p class="section-kicker">Recent work</p>
+            <h2 class="section-title">最近项目</h2>
           </div>
-          <div class="studio-brief">
-            <span>Brief</span>
-            <strong>手工香薰蜡烛</strong>
-            <p>礼物场景 · 生活方式 · 小红书首图</p>
-          </div>
-          <div class="studio-flow">
-            <div v-for="item in studioFlow" :key="item" class="flow-line">
-              <span></span>
-              <strong>{{ item }}</strong>
-            </div>
-          </div>
-          <div class="output-board">
-            <div class="output-shot primary-shot">
-              <span>Scene</span>
-            </div>
-            <div class="output-shot">
-              <span>Copy</span>
-            </div>
-            <div class="output-shot">
-              <span>Score</span>
-            </div>
-          </div>
+          <el-button text type="primary" :loading="loading" @click="loadRecentProjects">刷新</el-button>
         </div>
-      </div>
+
+        <el-alert v-if="error" class="home-alert" type="error" :title="error" :closable="false" />
+        <div v-if="recentProjects.length" class="recent-list">
+          <button
+            v-for="project in recentProjects"
+            :key="project.id"
+            class="recent-row"
+            type="button"
+            @click="$router.push(`/studio/${project.id}`)"
+          >
+            <strong>{{ project.product_name }}</strong>
+            <span>{{ project.target_platform }} · {{ statusLabel(project.status) }}</span>
+          </button>
+        </div>
+        <el-empty v-else-if="!loading" description="暂无项目，先创建一个商品素材任务" />
+        <el-skeleton v-else :rows="4" animated />
+      </aside>
     </div>
 
     <div class="grid-3 flow-grid">
@@ -57,169 +55,172 @@
 </template>
 
 <script setup lang="ts">
+import { computed, onMounted, ref } from 'vue'
 import { ChatLineRound, MagicStick, PictureRounded } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { errorMessage } from '../api/client'
+import { listProjects, type Project } from '../api/productshot'
 
-const studioFlow = ['商品分析', '创意策划', 'Prompt 构建', '图片生成', '评分迭代', '文案导出']
+const router = useRouter()
+const loading = ref(false)
+const error = ref('')
+const projects = ref<Project[]>([])
+
+const recentProjects = computed(() => projects.value.slice(0, 5))
 
 const flow = [
-  { title: '分析商品', text: '根据图片和卖点生成商品类型、人群、视觉风格和原图问题。', icon: PictureRounded },
-  { title: '规划创意', text: '自动输出 3 个可选营销方向，覆盖白底、电商、种草和促销场景。', icon: MagicStick },
-  { title: '评价迭代', text: '对生成图评分，给出修改建议，并支持自然语言二次调整。', icon: ChatLineRound }
+  { title: '分析商品', text: '读取商品信息和原图，沉淀人群、卖点、视觉风格和图片问题。', icon: PictureRounded },
+  { title: '规划创意', text: '生成多个营销方向，帮助你在生成前先比较场景、卖点和文案路线。', icon: MagicStick },
+  { title: '评价迭代', text: '把生成图、评分、文案和自然语言修改集中在同一个项目上下文。', icon: ChatLineRound }
 ]
+
+onMounted(loadRecentProjects)
+
+async function loadRecentProjects() {
+  loading.value = true
+  error.value = ''
+  try {
+    projects.value = await listProjects()
+  } catch (err) {
+    error.value = errorMessage(err)
+  } finally {
+    loading.value = false
+  }
+}
+
+function openLatestProject() {
+  const first = recentProjects.value[0]
+  if (first) {
+    router.push(`/studio/${first.id}`)
+  }
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    draft: '草稿',
+    analyzed: '已分析',
+    planned: '已出方案',
+    generated: '已生成',
+    reviewed: '已评分',
+    copywritten: '已出文案',
+    revised: '已修改',
+    exported: '已导出'
+  }
+  return labels[status] || status
+}
 </script>
 
 <style scoped>
-.hero {
-  align-items: center;
-  min-height: 520px;
-  margin-bottom: 38px;
+.home-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
+  gap: 16px;
+  align-items: stretch;
 }
 
-.hero-copy {
-  max-width: 760px;
+.home-start {
+  display: grid;
+  min-height: 430px;
+  align-content: center;
+  padding: 34px;
+  background:
+    linear-gradient(145deg, rgba(36, 88, 70, 0.08), transparent 42%),
+    rgba(251, 250, 246, 0.9);
 }
 
-.hero-actions {
+.home-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 30px;
+  gap: 10px;
+  margin-top: 24px;
 }
 
-.hero-preview {
-  width: min(440px, 100%);
-}
-
-.studio-card {
-  position: relative;
+.home-side {
   display: grid;
-  gap: 18px;
-  padding: 18px;
-  overflow: hidden;
+  align-content: start;
+  gap: 14px;
 }
 
-.studio-card::before {
-  position: absolute;
-  inset: 0;
-  border-left: 5px solid var(--ps-primary);
-  pointer-events: none;
-  content: "";
-}
-
-.studio-head {
+.section-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
 }
 
-.studio-brief {
-  padding: 20px;
-  border: 1px solid rgba(18, 63, 50, 0.14);
-  border-radius: var(--ps-radius);
-  background: var(--ps-bg-ink);
-  color: var(--ps-surface);
+.section-head .section-title {
+  margin-bottom: 0;
 }
 
-.studio-brief span {
-  color: rgba(255, 253, 248, 0.62);
-  font-size: 12px;
-  font-weight: 800;
-  text-transform: uppercase;
+.home-alert {
+  margin-bottom: 2px;
 }
 
-.studio-brief strong {
-  display: block;
-  margin-top: 8px;
-  font-family: Georgia, "Times New Roman", "Songti SC", serif;
-  font-size: 28px;
-  font-weight: 650;
-}
-
-.studio-brief p {
-  margin: 10px 0 0;
-  color: rgba(255, 253, 248, 0.72);
-}
-
-.studio-flow {
+.recent-list {
   display: grid;
   gap: 8px;
 }
 
-.flow-line {
+.recent-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  color: var(--ps-muted-strong);
-  font-size: 13px;
-}
-
-.flow-line span {
-  width: 24px;
-  height: 2px;
-  background: var(--ps-accent);
-}
-
-.output-board {
-  display: grid;
-  grid-template-columns: 1.2fr 0.8fr 0.8fr;
-  gap: 10px;
-}
-
-.output-shot {
-  display: flex;
-  min-height: 96px;
-  align-items: end;
-  padding: 10px;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
   border: 1px solid var(--ps-border);
   border-radius: var(--ps-radius);
-  background:
-    linear-gradient(135deg, rgba(18, 63, 50, 0.08), rgba(229, 111, 79, 0.12)),
-    var(--ps-surface-quiet);
+  color: inherit;
+  background: var(--ps-surface-quiet);
+  text-align: left;
+  cursor: pointer;
 }
 
-.primary-shot {
-  min-height: 132px;
-  background:
-    linear-gradient(140deg, rgba(18, 63, 50, 0.92) 0 52%, rgba(229, 111, 79, 0.92) 52% 100%),
-    var(--ps-bg-ink);
+.recent-row:hover {
+  border-color: rgba(36, 88, 70, 0.28);
+  background: var(--ps-primary-soft);
 }
 
-.output-shot span {
-  color: var(--ps-muted-strong);
-  font-size: 13px;
-  font-weight: 800;
+.recent-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ps-heading);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.primary-shot span {
-  color: var(--ps-surface);
+.recent-row span {
+  color: var(--ps-muted);
+  font-size: 12px;
+}
+
+.flow-grid {
+  margin-top: 16px;
 }
 
 .flow-icon {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   color: var(--ps-accent);
 }
 
 .agent-card h3 {
-  margin: 14px 0 8px;
-  font-size: 18px;
+  margin: 12px 0 8px;
+  font-size: 17px;
 }
 
 .agent-card p {
   margin: 0;
   color: var(--ps-muted);
-  line-height: 1.7;
+  line-height: 1.65;
 }
 
-@media (max-width: 900px) {
-  .hero-preview {
-    width: 100%;
+@media (max-width: 980px) {
+  .home-console {
+    grid-template-columns: 1fr;
   }
 
-  .hero {
+  .home-start {
     min-height: 0;
+    padding: 24px;
   }
 }
 </style>

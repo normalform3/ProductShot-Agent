@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy.orm import Session
 
 from app.agents import (
@@ -19,8 +21,9 @@ from app.models import (
     ProductAnalysis,
     ProductAsset,
     Project,
+    WorkflowEvent,
 )
-from app.providers import get_image_provider
+from app.providers import get_image_provider, get_text_provider
 from app.schemas import (
     CopywritingPayload,
     CopywritingRead,
@@ -37,31 +40,65 @@ from app.schemas import (
     ProductAssetRead,
     ProjectRead,
     RevisionResponse,
+    WorkflowEventRead,
 )
 from app.utils.json import dumps, loads
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class ProductShotWorkflow:
     def __init__(self, db: Session) -> None:
         self.db = db
-        self.analysis_agent = ProductAnalysisAgent()
-        self.planner_agent = CreativePlannerAgent()
-        self.prompt_agent = PromptEngineerAgent()
-        self.critic_agent = ImageCriticAgent()
-        self.copywriting_agent = CopywritingAgent()
-        self.revision_agent = RevisionAgent()
+        self.text_provider = get_text_provider()
+        self.analysis_agent = ProductAnalysisAgent(self.text_provider)
+        self.planner_agent = CreativePlannerAgent(self.text_provider)
+        self.prompt_agent = PromptEngineerAgent(self.text_provider)
+        self.critic_agent = ImageCriticAgent(self.text_provider)
+        self.copywriting_agent = CopywritingAgent(self.text_provider)
+        self.revision_agent = RevisionAgent(self.text_provider)
 
     def analyze(self, project: Project) -> ProductAnalysisRead:
+        started_at = utcnow()
         primary = self.primary_asset(project.id)
-        payload = self.analysis_agent.run(project, primary.file_path if primary else None)
-        row = ProductAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
-        project.status = "analyzed"
-        self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
-        return self.analysis_read(row)
+        try:
+            payload = self.analysis_agent.run(project, primary.file_path if primary else None)
+            row = ProductAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
+            project.status = "analyzed"
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="analysis",
+                agent_name="ProductAnalysisAgent",
+                status="success",
+                summary=f"识别为 {payload.product_type}，提炼 {len(payload.recommended_selling_points)} 个推荐卖点。",
+                detail={
+                    "product_type": payload.product_type,
+                    "recommended_selling_points": payload.recommended_selling_points,
+                    "image_issues": payload.image_issues,
+                },
+                started_at=started_at,
+            )
+            return self.analysis_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="analysis",
+                agent_name="ProductAnalysisAgent",
+                status="failed",
+                summary="商品分析失败。",
+                detail={"has_primary_asset": bool(primary)},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
 
     def generate_plans(self, project: Project) -> list[CreativePlanRead]:
+        started_at = utcnow()
         analysis = self.latest_analysis(project.id)
         if analysis is None:
             analysis = self.analyze(project)
@@ -69,43 +106,96 @@ class ProductShotWorkflow:
         else:
             analysis_payload = ProductAnalysisPayload.model_validate_json(analysis.analysis_json)
 
-        for old in self.db.query(CreativePlan).filter(CreativePlan.project_id == project.id).all():
-            self.db.delete(old)
-        self.db.flush()
+        try:
+            for old in self.db.query(CreativePlan).filter(CreativePlan.project_id == project.id).all():
+                self.db.delete(old)
+            self.db.flush()
 
-        payloads = self.planner_agent.run(project, analysis_payload)
-        rows: list[CreativePlan] = []
-        for payload in payloads:
-            row = CreativePlan(
-                project_id=project.id,
-                plan_name=payload.plan_name,
-                plan_description=payload.visual_description,
-                target_platform=payload.applicable_platform,
-                visual_style=payload.visual_style,
-                selling_angle=payload.main_selling_point,
-                plan_json=payload.model_dump_json(),
+            payloads = self.planner_agent.run(project, analysis_payload)
+            rows: list[CreativePlan] = []
+            for payload in payloads:
+                row = CreativePlan(
+                    project_id=project.id,
+                    plan_name=payload.plan_name,
+                    plan_description=payload.visual_description,
+                    target_platform=payload.applicable_platform,
+                    visual_style=payload.visual_style,
+                    selling_angle=payload.main_selling_point,
+                    plan_json=payload.model_dump_json(),
+                )
+                self.db.add(row)
+                rows.append(row)
+            project.status = "planned"
+            self.db.commit()
+            self.record_event(
+                project.id,
+                step_key="plans",
+                agent_name="CreativePlannerAgent",
+                status="success",
+                summary=f"生成 {len(payloads)} 个创意方向。",
+                detail={"plans": [payload.plan_name for payload in payloads]},
+                started_at=started_at,
             )
-            self.db.add(row)
-            rows.append(row)
-        project.status = "planned"
-        self.db.commit()
-        return [self.creative_plan_read(row) for row in rows]
+            return [self.creative_plan_read(row) for row in rows]
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="plans",
+                agent_name="CreativePlannerAgent",
+                status="failed",
+                summary="创意方案生成失败。",
+                detail={"analysis_product_type": analysis_payload.product_type},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
 
     def generate_images(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
         payload = CreativePlanPayload.model_validate_json(plan.plan_json)
-        prompt = self.prompt_agent.run(project, payload)
+        prompt_started_at = utcnow()
+        try:
+            prompt = self.prompt_agent.run(project, payload)
+            self.record_event(
+                project.id,
+                step_key="prompt",
+                agent_name="PromptEngineerAgent",
+                status="success",
+                summary=f"构建 {prompt.size} 的图片生成 Prompt。",
+                detail={
+                    "plan_name": payload.plan_name,
+                    "size": prompt.size,
+                    "style": prompt.style,
+                    "positive_prompt": prompt.positive_prompt,
+                    "negative_prompt": prompt.negative_prompt,
+                },
+                started_at=prompt_started_at,
+            )
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="prompt",
+                agent_name="PromptEngineerAgent",
+                status="failed",
+                summary="Prompt 构建失败。",
+                detail={"plan_name": payload.plan_name},
+                error_message=str(exc),
+                started_at=prompt_started_at,
+            )
+            raise
+
+        provider = get_image_provider()
         task = GenerationTask(
             project_id=project.id,
             plan_id=plan.id,
             prompt=prompt.positive_prompt,
             negative_prompt=prompt.negative_prompt,
-            model_name=get_image_provider().name,
+            model_name=provider.name,
             status="running",
         )
         self.db.add(task)
         self.db.flush()
         primary = self.primary_asset(project.id)
-        provider = get_image_provider()
+        image_started_at = utcnow()
         try:
             generated = provider.generate_images(
                 project_id=project.id,
@@ -131,6 +221,23 @@ class ProductShotWorkflow:
             task.status = "success"
             project.status = "generated"
             self.db.commit()
+            self.record_event(
+                project.id,
+                step_key="images",
+                agent_name=f"{provider.name} ImageProvider",
+                status="success",
+                summary=f"生成 {len(images)} 张营销图片。",
+                detail={
+                    "task_id": task.id,
+                    "plan_id": plan.id,
+                    "model_name": provider.name,
+                    "count": len(images),
+                    "prompt": task.prompt,
+                    "negative_prompt": task.negative_prompt,
+                    "image_ids": [image.id for image in images],
+                },
+                started_at=image_started_at,
+            )
             return GeneratedImagesResponse(
                 task=GenerationTaskRead.model_validate(task),
                 prompt=prompt,
@@ -140,64 +247,149 @@ class ProductShotWorkflow:
             task.status = "failed"
             task.error_message = str(exc)
             self.db.commit()
+            self.record_event(
+                project.id,
+                step_key="images",
+                agent_name=f"{provider.name} ImageProvider",
+                status="failed",
+                summary="图片生成失败。",
+                detail={"task_id": task.id, "plan_id": plan.id, "model_name": provider.name},
+                error_message=str(exc),
+                started_at=image_started_at,
+            )
             raise
 
     def review_image(self, project: Project, image: GeneratedImage) -> ImageReviewRead:
+        started_at = utcnow()
         if image.task.plan is None:
             raise ValueError("生成图片缺少创意方案")
         plan_payload = CreativePlanPayload.model_validate_json(image.task.plan.plan_json)
-        payload = self.critic_agent.run(project, image, plan_payload)
-        row = ImageReview(
-            image_id=image.id,
-            overall_score=payload.overall_score,
-            product_clarity_score=payload.product_clarity,
-            style_match_score=payload.style_match,
-            commercial_value_score=payload.commercial_value,
-            platform_fit_score=payload.platform_fit,
-            defects_json=dumps(payload.defects),
-            suggestions_json=dumps(payload.suggestions),
-        )
-        image.score = payload.overall_score
-        project.status = "reviewed"
-        self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
-        return self.review_read(row)
+        try:
+            payload = self.critic_agent.run(project, image, plan_payload)
+            row = ImageReview(
+                image_id=image.id,
+                overall_score=payload.overall_score,
+                product_clarity_score=payload.product_clarity,
+                style_match_score=payload.style_match,
+                commercial_value_score=payload.commercial_value,
+                platform_fit_score=payload.platform_fit,
+                defects_json=dumps(payload.defects),
+                suggestions_json=dumps(payload.suggestions),
+            )
+            image.score = payload.overall_score
+            project.status = "reviewed"
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="review",
+                agent_name="ImageCriticAgent",
+                status="success",
+                summary=f"图片 {image.id} 评分 {payload.overall_score}。",
+                detail=payload.model_dump(),
+                started_at=started_at,
+            )
+            return self.review_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="review",
+                agent_name="ImageCriticAgent",
+                status="failed",
+                summary=f"图片 {image.id} 评价失败。",
+                detail={"image_id": image.id},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
 
     def create_copywriting(self, project: Project, image: GeneratedImage | None) -> CopywritingRead:
+        started_at = utcnow()
         plan = image.task.plan if image and image.task else self.latest_plan(project.id)
         if plan is None:
             raise ValueError("请先生成创意方案")
         plan_payload = CreativePlanPayload.model_validate_json(plan.plan_json)
         latest_review = image.reviews[-1] if image and image.reviews else None
         review_payload = self.review_payload(latest_review) if latest_review else None
-        payload = self.copywriting_agent.run(project, plan_payload, review_payload)
-        row = Copywriting(
-            project_id=project.id,
-            image_id=image.id if image else None,
-            title=payload.title,
-            selling_points_json=dumps(payload.selling_points),
-            xiaohongshu_title=payload.xiaohongshu_title,
-            xiaohongshu_text=payload.xiaohongshu_text,
-            moments_text=payload.moments_text,
-            taobao_text=payload.taobao_text,
-            tags_json=dumps(payload.tags),
-        )
-        project.status = "copywritten"
-        self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
-        return self.copywriting_read(row)
+        try:
+            payload = self.copywriting_agent.run(project, plan_payload, review_payload)
+            row = Copywriting(
+                project_id=project.id,
+                image_id=image.id if image else None,
+                title=payload.title,
+                selling_points_json=dumps(payload.selling_points),
+                xiaohongshu_title=payload.xiaohongshu_title,
+                xiaohongshu_text=payload.xiaohongshu_text,
+                moments_text=payload.moments_text,
+                taobao_text=payload.taobao_text,
+                tags_json=dumps(payload.tags),
+            )
+            project.status = "copywritten"
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="copy",
+                agent_name="CopywritingAgent",
+                status="success",
+                summary=f"生成标题和 {len(payload.tags)} 个标签。",
+                detail={"title": payload.title, "tags": payload.tags, "image_id": image.id if image else None},
+                started_at=started_at,
+            )
+            return self.copywriting_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="copy",
+                agent_name="CopywritingAgent",
+                status="failed",
+                summary="文案生成失败。",
+                detail={"image_id": image.id if image else None},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
 
     def revise(self, project: Project, instruction: str) -> RevisionResponse:
+        started_at = utcnow()
         plan = self.latest_plan(project.id)
         if plan is None:
             raise ValueError("请先生成创意方案")
         payload = CreativePlanPayload.model_validate_json(plan.plan_json)
-        response = self.revision_agent.run(project, payload, instruction)
-        project.status = "revised"
-        self.db.commit()
-        return response
+        try:
+            response = self.revision_agent.run(project, payload, instruction)
+            project.status = "revised"
+            self.db.commit()
+            self.record_event(
+                project.id,
+                step_key="revision",
+                agent_name="RevisionAgent",
+                status="success",
+                summary=f"识别为 {response.revision_type} 修改，目标：{response.target}。",
+                detail={
+                    "instruction": instruction,
+                    "revision_type": response.revision_type,
+                    "target": response.target,
+                    "should_regenerate": response.should_regenerate,
+                    "modification_plan": response.modification_plan,
+                },
+                started_at=started_at,
+            )
+            return response
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="revision",
+                agent_name="RevisionAgent",
+                status="failed",
+                summary="修改意图分析失败。",
+                detail={"instruction": instruction},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
 
     def export_report(self, project: Project, revision: RevisionResponse | None = None) -> ExportReport:
         return ExportReport(
@@ -216,6 +408,40 @@ class ProductShotWorkflow:
             revision=revision,
             metadata={"provider": get_image_provider().name, "status": project.status},
         )
+
+    def workflow_event_read(self, row: WorkflowEvent) -> WorkflowEventRead:
+        return WorkflowEventRead.model_validate(row)
+
+    def record_event(
+        self,
+        project_id: int,
+        *,
+        step_key: str,
+        agent_name: str,
+        status: str,
+        summary: str,
+        detail: dict | None = None,
+        error_message: str | None = None,
+        started_at: datetime | None = None,
+    ) -> WorkflowEvent:
+        started = started_at or utcnow()
+        ended = utcnow()
+        row = WorkflowEvent(
+            project_id=project_id,
+            step_key=step_key,
+            agent_name=agent_name,
+            status=status,
+            summary=summary[:300],
+            detail_json=dumps(detail or {}),
+            error_message=error_message,
+            started_at=started,
+            ended_at=ended,
+            latency_ms=max(0, int((ended - started).total_seconds() * 1000)),
+        )
+        self.db.add(row)
+        self.db.commit()
+        self.db.refresh(row)
+        return row
 
     def primary_asset(self, project_id: int) -> ProductAsset | None:
         return (

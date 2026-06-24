@@ -46,6 +46,13 @@ export const useProjectStore = defineStore('project', {
         this.loading = false
       }
     },
+    resetCurrent() {
+      this.current = null
+      this.lastReview = null
+      this.steps.forEach((step) => {
+        step.status = 'pending'
+      })
+    },
     async runAnalysisAndPlans(projectId: number) {
       this.setStep('analysis', 'running')
       await analyzeProject(projectId)
@@ -102,4 +109,3 @@ export const useProjectStore = defineStore('project', {
     }
   }
 })
-

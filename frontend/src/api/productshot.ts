@@ -158,12 +158,61 @@ export interface RevisionResponse {
   notes: string
 }
 
+export interface ModelSettings {
+  text_provider: string
+  text_model: string
+  image_provider: string
+  image_model: string
+  dashscope_text_base_url: string
+  dashscope_image_generation_url: string
+  dashscope_workspace_id_configured: boolean
+  dashscope_api_key_configured: boolean
+  available_text_providers: string[]
+  available_image_providers: string[]
+}
+
+export type ModelSettingsUpdate = Partial<
+  Pick<
+    ModelSettings,
+    | 'text_provider'
+    | 'text_model'
+    | 'image_provider'
+    | 'image_model'
+    | 'dashscope_text_base_url'
+    | 'dashscope_image_generation_url'
+  >
+>
+
+export interface ModelConnectionTest {
+  provider: string
+  model: string
+  status: string
+  latency_ms: number
+  message: string
+  checked_at: string
+}
+
+export interface WorkflowEvent {
+  id: number
+  project_id: number
+  step_key: string
+  agent_name: string
+  status: string
+  summary: string
+  detail_json: string
+  error_message?: string | null
+  started_at: string
+  ended_at?: string | null
+  latency_ms?: number | null
+}
+
 export interface ProjectDetail extends Project {
   assets: ProductAsset[]
   latest_analysis?: ProductAnalysisRead | null
   creative_plans: CreativePlan[]
   generated_images: GeneratedImage[]
   latest_copywriting?: CopywritingRead | null
+  workflow_events: WorkflowEvent[]
 }
 
 export async function createProject(payload: ProjectCreate) {
@@ -233,6 +282,21 @@ export async function reviseProject(projectId: number, instruction: string, imag
   return data
 }
 
+export async function getModelSettings() {
+  const { data } = await http.get<ModelSettings>('/api/model-settings')
+  return data
+}
+
+export async function updateModelSettings(payload: ModelSettingsUpdate) {
+  const { data } = await http.put<ModelSettings>('/api/model-settings', payload)
+  return data
+}
+
+export async function testTextModelConnection() {
+  const { data } = await http.post<ModelConnectionTest>('/api/model-settings/test-text')
+  return data
+}
+
 export function markdownExportUrl(projectId: number) {
   return `${http.defaults.baseURL}/api/projects/${projectId}/export/markdown`
 }
@@ -240,4 +304,3 @@ export function markdownExportUrl(projectId: number) {
 export function jsonExportUrl(projectId: number) {
   return `${http.defaults.baseURL}/api/projects/${projectId}/export/json`
 }
-
