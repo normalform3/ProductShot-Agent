@@ -1,0 +1,2 @@
+"""ProductShot Agent backend application."""
+
