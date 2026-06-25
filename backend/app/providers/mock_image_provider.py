@@ -10,6 +10,7 @@ from app.providers.image_provider import GeneratedImageFile
 
 class MockImageProvider:
     name = "mock"
+    capabilities = {"text_to_image", "image_to_image", "reference_image"}
 
     def generate_images(
         self,

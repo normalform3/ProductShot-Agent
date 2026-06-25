@@ -15,6 +15,7 @@ class GeneratedImageFile:
 
 class ImageProvider(Protocol):
     name: str
+    capabilities: set[str]
 
     def generate_images(
         self,

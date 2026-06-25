@@ -6,6 +6,7 @@ from app.models.entities import (
     ImageReview,
     ProductAnalysis,
     ProductAsset,
+    ProductVisualAnalysis,
     Project,
     WorkflowEvent,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "Project",
     "ProductAsset",
     "ProductAnalysis",
+    "ProductVisualAnalysis",
     "CreativePlan",
     "GenerationTask",
     "GeneratedImage",

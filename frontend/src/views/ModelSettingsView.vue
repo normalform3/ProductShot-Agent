@@ -74,9 +74,9 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="模型">
-                <el-input v-model="form.text_model" placeholder="qwen3.7plus" />
+                <el-input v-model="form.text_model" placeholder="qwen3.7-plus" />
               </el-form-item>
-              <el-form-item label="DashScope Chat Base URL">
+              <el-form-item label="DashScope Base HTTP API URL">
                 <el-input v-model="form.dashscope_text_base_url" />
               </el-form-item>
             </el-form>
@@ -102,9 +102,9 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="模型">
-                <el-input v-model="form.image_model" placeholder="wan2.6-t2i" />
+                <el-input v-model="form.image_model" placeholder="wan2.7-image-pro" />
               </el-form-item>
-              <el-form-item label="DashScope Image Generation URL">
+              <el-form-item label="DashScope SDK Base URL">
                 <el-input v-model="form.dashscope_image_generation_url" />
               </el-form-item>
             </el-form>

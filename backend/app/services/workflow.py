@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,7 @@ from app.agents import (
     ProductAnalysisAgent,
     PromptEngineerAgent,
     RevisionAgent,
+    VisualAnalysisAgent,
 )
 from app.models import (
     Copywriting,
@@ -20,6 +22,7 @@ from app.models import (
     ImageReview,
     ProductAnalysis,
     ProductAsset,
+    ProductVisualAnalysis,
     Project,
     WorkflowEvent,
 )
@@ -38,8 +41,10 @@ from app.schemas import (
     ProductAnalysisPayload,
     ProductAnalysisRead,
     ProductAssetRead,
+    ProductVisualAnalysisRead,
     ProjectRead,
     RevisionResponse,
+    VisualAnalysisPayload,
     WorkflowEventRead,
 )
 from app.utils.json import dumps, loads
@@ -53,6 +58,7 @@ class ProductShotWorkflow:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.text_provider = get_text_provider()
+        self.visual_agent = VisualAnalysisAgent(self.text_provider)
         self.analysis_agent = ProductAnalysisAgent(self.text_provider)
         self.planner_agent = CreativePlannerAgent(self.text_provider)
         self.prompt_agent = PromptEngineerAgent(self.text_provider)
@@ -60,11 +66,53 @@ class ProductShotWorkflow:
         self.copywriting_agent = CopywritingAgent(self.text_provider)
         self.revision_agent = RevisionAgent(self.text_provider)
 
-    def analyze(self, project: Project) -> ProductAnalysisRead:
+    def plan(self, project: Project) -> list[CreativePlanRead]:
+        self.ensure_visual_analysis(project)
+        self.analyze(project)
+        return self.generate_plans(project)
+
+    def ensure_visual_analysis(self, project: Project) -> ProductVisualAnalysisRead:
+        existing = self.latest_visual_analysis(project.id)
+        if existing is not None:
+            return self.visual_analysis_read(existing)
+
         started_at = utcnow()
         primary = self.primary_asset(project.id)
         try:
-            payload = self.analysis_agent.run(project, primary.file_path if primary else None)
+            payload = self.visual_agent.run(project, primary.file_path if primary else None)
+            row = ProductVisualAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
+            self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+            self.record_event(
+                project.id,
+                step_key="visual_analysis",
+                agent_name="VisualAnalysisAgent",
+                status="success",
+                summary="完成原图视觉理解和商品保真约束提取。",
+                detail=payload.model_dump(),
+                started_at=started_at,
+            )
+            return self.visual_analysis_read(row)
+        except Exception as exc:
+            self.record_event(
+                project.id,
+                step_key="visual_analysis",
+                agent_name="VisualAnalysisAgent",
+                status="failed",
+                summary="原图视觉理解失败。",
+                detail={"has_primary_asset": bool(primary)},
+                error_message=str(exc),
+                started_at=started_at,
+            )
+            raise
+
+    def analyze(self, project: Project) -> ProductAnalysisRead:
+        started_at = utcnow()
+        primary = self.primary_asset(project.id)
+        visual_read = self.ensure_visual_analysis(project)
+        try:
+            payload = self.analysis_agent.run(project, primary.file_path if primary else None, visual_read.analysis)
             row = ProductAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
             project.status = "analyzed"
             self.db.add(row)
@@ -152,9 +200,11 @@ class ProductShotWorkflow:
 
     def generate_images(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
         payload = CreativePlanPayload.model_validate_json(plan.plan_json)
+        analysis_row = self.latest_analysis(project.id)
+        analysis_payload = ProductAnalysisPayload.model_validate_json(analysis_row.analysis_json) if analysis_row else None
         prompt_started_at = utcnow()
         try:
-            prompt = self.prompt_agent.run(project, payload)
+            prompt = self.prompt_agent.run(project, payload, analysis_payload)
             self.record_event(
                 project.id,
                 step_key="prompt",
@@ -167,6 +217,8 @@ class ProductShotWorkflow:
                     "style": prompt.style,
                     "positive_prompt": prompt.positive_prompt,
                     "negative_prompt": prompt.negative_prompt,
+                    "generation_mode": prompt.generation_mode,
+                    "reference_strength": prompt.reference_strength,
                 },
                 started_at=prompt_started_at,
             )
@@ -184,17 +236,22 @@ class ProductShotWorkflow:
             raise
 
         provider = get_image_provider()
+        provider_model = getattr(provider, "model", provider.name)
+        primary = self.primary_asset(project.id)
+        capabilities = getattr(provider, "capabilities", {"text_to_image"})
+        if prompt.generation_mode in {"image_to_image", "reference_image"} and primary and "image_to_image" not in capabilities:
+            raise RuntimeError(f"{provider.name} ImageProvider does not support source-image generation.")
         task = GenerationTask(
             project_id=project.id,
             plan_id=plan.id,
             prompt=prompt.positive_prompt,
             negative_prompt=prompt.negative_prompt,
-            model_name=provider.name,
+            model_name=provider_model,
             status="running",
         )
         self.db.add(task)
         self.db.flush()
-        primary = self.primary_asset(project.id)
+        prompt_pack_id = f"prompt_{task.id}_{uuid4().hex[:8]}"
         image_started_at = utcnow()
         try:
             generated = provider.generate_images(
@@ -209,6 +266,11 @@ class ProductShotWorkflow:
                 GeneratedImage(
                     task_id=task.id,
                     project_id=project.id,
+                    plan_id=plan.id,
+                    platform=prompt.platform,
+                    generation_mode=prompt.generation_mode,
+                    prompt_pack_id=prompt_pack_id,
+                    prompt_pack_json=prompt.model_dump_json(),
                     image_url=item.image_url,
                     image_path=str(item.image_path),
                     width=item.width,
@@ -230,10 +292,11 @@ class ProductShotWorkflow:
                 detail={
                     "task_id": task.id,
                     "plan_id": plan.id,
-                    "model_name": provider.name,
+                    "model_name": provider_model,
                     "count": len(images),
                     "prompt": task.prompt,
                     "negative_prompt": task.negative_prompt,
+                    "generation_mode": prompt.generation_mode,
                     "image_ids": [image.id for image in images],
                 },
                 started_at=image_started_at,
@@ -253,26 +316,69 @@ class ProductShotWorkflow:
                 agent_name=f"{provider.name} ImageProvider",
                 status="failed",
                 summary="图片生成失败。",
-                detail={"task_id": task.id, "plan_id": plan.id, "model_name": provider.name},
+                detail={"task_id": task.id, "plan_id": plan.id, "model_name": provider_model},
                 error_message=str(exc),
                 started_at=image_started_at,
             )
             raise
+
+    def generate_pack(self, project: Project, plan: CreativePlan, count: int) -> GeneratedImagesResponse:
+        result = self.generate_images(project, plan, count)
+        images = (
+            self.db.query(GeneratedImage)
+            .filter(GeneratedImage.task_id == result.task.id)
+            .order_by(GeneratedImage.id.asc())
+            .all()
+        )
+        for image in images:
+            self.review_image(project, image)
+
+        refreshed = (
+            self.db.query(GeneratedImage)
+            .filter(GeneratedImage.task_id == result.task.id)
+            .order_by(GeneratedImage.score.desc().nullslast(), GeneratedImage.id.asc())
+            .all()
+        )
+        best = refreshed[0] if refreshed else None
+        if best is not None:
+            for image in refreshed:
+                image.is_recommended = image.id == best.id
+                image.is_selected = image.id == best.id
+            self.db.commit()
+            self.create_copywriting(project, best)
+
+        final_images = (
+            self.db.query(GeneratedImage)
+            .filter(GeneratedImage.task_id == result.task.id)
+            .order_by(GeneratedImage.is_recommended.desc(), GeneratedImage.id.asc())
+            .all()
+        )
+        return GeneratedImagesResponse(
+            task=result.task,
+            prompt=result.prompt,
+            images=[GeneratedImageRead.model_validate(image) for image in final_images],
+        )
 
     def review_image(self, project: Project, image: GeneratedImage) -> ImageReviewRead:
         started_at = utcnow()
         if image.task.plan is None:
             raise ValueError("生成图片缺少创意方案")
         plan_payload = CreativePlanPayload.model_validate_json(image.task.plan.plan_json)
+        visual = self.visual_analysis_payload(self.latest_visual_analysis(project.id))
+        primary = self.primary_asset(project.id)
         try:
-            payload = self.critic_agent.run(project, image, plan_payload)
+            payload = self.critic_agent.run(project, image, plan_payload, visual, primary.file_path if primary else None)
             row = ImageReview(
                 image_id=image.id,
                 overall_score=payload.overall_score,
                 product_clarity_score=payload.product_clarity,
+                product_consistency_score=payload.product_consistency,
                 style_match_score=payload.style_match,
                 commercial_value_score=payload.commercial_value,
                 platform_fit_score=payload.platform_fit,
+                text_artifact_risk=payload.text_artifact_risk,
+                ai_artifact_risk=payload.ai_artifact_risk,
+                recommendation_level=payload.recommendation_level,
                 defects_json=dumps(payload.defects),
                 suggestions_json=dumps(payload.suggestions),
             )
@@ -323,6 +429,7 @@ class ProductShotWorkflow:
                 xiaohongshu_text=payload.xiaohongshu_text,
                 moments_text=payload.moments_text,
                 taobao_text=payload.taobao_text,
+                douyin_script=payload.douyin_script,
                 tags_json=dumps(payload.tags),
             )
             project.status = "copywritten"
@@ -459,6 +566,14 @@ class ProductShotWorkflow:
             .first()
         )
 
+    def latest_visual_analysis(self, project_id: int) -> ProductVisualAnalysis | None:
+        return (
+            self.db.query(ProductVisualAnalysis)
+            .filter(ProductVisualAnalysis.project_id == project_id)
+            .order_by(ProductVisualAnalysis.created_at.desc())
+            .first()
+        )
+
     def latest_plan(self, project_id: int) -> CreativePlan | None:
         return (
             self.db.query(CreativePlan)
@@ -471,6 +586,19 @@ class ProductShotWorkflow:
         if row is None:
             return None
         return ProductAnalysisPayload.model_validate_json(row.analysis_json)
+
+    def visual_analysis_payload(self, row: ProductVisualAnalysis | None) -> VisualAnalysisPayload | None:
+        if row is None:
+            return None
+        return VisualAnalysisPayload.model_validate_json(row.analysis_json)
+
+    def visual_analysis_read(self, row: ProductVisualAnalysis) -> ProductVisualAnalysisRead:
+        return ProductVisualAnalysisRead(
+            id=row.id,
+            project_id=row.project_id,
+            analysis=VisualAnalysisPayload.model_validate_json(row.analysis_json),
+            created_at=row.created_at,
+        )
 
     def analysis_read(self, row: ProductAnalysis) -> ProductAnalysisRead:
         return ProductAnalysisRead(
@@ -497,9 +625,13 @@ class ProductShotWorkflow:
         return ImageReviewPayload(
             overall_score=row.overall_score,
             product_clarity=row.product_clarity_score,
+            product_consistency=row.product_consistency_score,
             style_match=row.style_match_score,
             commercial_value=row.commercial_value_score,
             platform_fit=row.platform_fit_score,
+            text_artifact_risk=row.text_artifact_risk,
+            ai_artifact_risk=row.ai_artifact_risk,
+            recommendation_level=row.recommendation_level,
             defects=loads(row.defects_json, []),
             suggestions=loads(row.suggestions_json, []),
         )
@@ -515,6 +647,7 @@ class ProductShotWorkflow:
             xiaohongshu_text=row.xiaohongshu_text,
             moments_text=row.moments_text,
             taobao_text=row.taobao_text,
+            douyin_script=getattr(row, "douyin_script", "") or "",
             tags=loads(row.tags_json, []),
         )
         return CopywritingRead(

@@ -42,6 +42,27 @@ export interface ProductAnalysis {
   recommended_visual_styles: string[]
   image_issues: string[]
   marketing_angles: string[]
+  visual_summary?: string | null
+  product_consistency_rules: string[]
+  platform_strategy?: string | null
+}
+
+export interface VisualAnalysis {
+  product_appearance: string
+  dominant_colors: string[]
+  materials: string[]
+  visible_text_or_logo: string[]
+  subject_clarity: string
+  background_issues: string[]
+  fidelity_constraints: string[]
+  marketing_opportunities: string[]
+}
+
+export interface ProductVisualAnalysisRead {
+  id: number
+  project_id: number
+  analysis: VisualAnalysis
+  created_at: string
 }
 
 export interface ProductAnalysisRead {
@@ -60,6 +81,7 @@ export interface CreativePlanPayload {
   main_selling_point: string
   recommendation_reason: string
   copywriting_direction: string
+  expected_outputs: string[]
 }
 
 export interface CreativePlan {
@@ -82,6 +104,13 @@ export interface PromptPayload {
   product_consistency_notes: string
 }
 
+export interface PromptPackPayload extends PromptPayload {
+  platform: string
+  generation_mode: string
+  reference_strength: number
+  consistency_rules: string[]
+}
+
 export interface GenerationTask {
   id: number
   project_id: number
@@ -99,27 +128,36 @@ export interface GeneratedImage {
   id: number
   task_id: number
   project_id: number
+  plan_id?: number | null
+  platform?: string | null
+  generation_mode?: string | null
+  prompt_pack_id?: string | null
   image_url: string
   image_path: string
   width?: number | null
   height?: number | null
   score?: number | null
   is_selected: boolean
+  is_recommended: boolean
   created_at: string
 }
 
 export interface GeneratedImagesResponse {
   task: GenerationTask
-  prompt: PromptPayload
+  prompt: PromptPackPayload
   images: GeneratedImage[]
 }
 
 export interface ImageReviewPayload {
   overall_score: number
   product_clarity: number
+  product_consistency: number
   style_match: number
   commercial_value: number
   platform_fit: number
+  text_artifact_risk: string
+  ai_artifact_risk: string
+  recommendation_level: string
   defects: string[]
   suggestions: string[]
 }
@@ -138,6 +176,7 @@ export interface CopywritingPayload {
   xiaohongshu_text: string
   moments_text: string
   taobao_text: string
+  douyin_script: string
   tags: string[]
 }
 
@@ -208,6 +247,8 @@ export interface WorkflowEvent {
 
 export interface ProjectDetail extends Project {
   assets: ProductAsset[]
+  visual_analysis?: ProductVisualAnalysisRead | null
+  product_strategy?: ProductAnalysisRead | null
   latest_analysis?: ProductAnalysisRead | null
   creative_plans: CreativePlan[]
   generated_images: GeneratedImage[]
@@ -249,6 +290,11 @@ export async function generatePlans(projectId: number) {
   return data
 }
 
+export async function planProject(projectId: number) {
+  const { data } = await http.post<CreativePlan[]>(`/api/projects/${projectId}/agent/plan`)
+  return data
+}
+
 export async function listPlans(projectId: number) {
   const { data } = await http.get<CreativePlan[]>(`/api/projects/${projectId}/creative-plans`)
   return data
@@ -257,6 +303,14 @@ export async function listPlans(projectId: number) {
 export async function generateImages(projectId: number, planId: number, count = 4) {
   const { data } = await http.post<GeneratedImagesResponse>(
     `/api/projects/${projectId}/creative-plans/${planId}/generate-images`,
+    { count }
+  )
+  return data
+}
+
+export async function generatePack(projectId: number, planId: number, count = 4) {
+  const { data } = await http.post<GeneratedImagesResponse>(
+    `/api/projects/${projectId}/creative-plans/${planId}/generate-pack`,
     { count }
   )
   return data

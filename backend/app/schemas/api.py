@@ -38,7 +38,18 @@ class ProductAssetRead(BaseModel):
     created_at: datetime
 
 
-class ProductAnalysisPayload(BaseModel):
+class VisualAnalysisPayload(BaseModel):
+    product_appearance: str
+    dominant_colors: list[str]
+    materials: list[str]
+    visible_text_or_logo: list[str]
+    subject_clarity: str
+    background_issues: list[str]
+    fidelity_constraints: list[str]
+    marketing_opportunities: list[str]
+
+
+class ProductStrategyPayload(BaseModel):
     product_type: str
     core_features: list[str]
     target_audience_analysis: str
@@ -46,12 +57,25 @@ class ProductAnalysisPayload(BaseModel):
     recommended_visual_styles: list[str]
     image_issues: list[str]
     marketing_angles: list[str]
+    visual_summary: str | None = None
+    product_consistency_rules: list[str] = Field(default_factory=list)
+    platform_strategy: str | None = None
+
+
+ProductAnalysisPayload = ProductStrategyPayload
+
+
+class ProductVisualAnalysisRead(BaseModel):
+    id: int
+    project_id: int
+    analysis: VisualAnalysisPayload
+    created_at: datetime
 
 
 class ProductAnalysisRead(BaseModel):
     id: int
     project_id: int
-    analysis: ProductAnalysisPayload
+    analysis: ProductStrategyPayload
     created_at: datetime
 
 
@@ -64,6 +88,7 @@ class CreativePlanPayload(BaseModel):
     main_selling_point: str
     recommendation_reason: str
     copywriting_direction: str
+    expected_outputs: list[str] = Field(default_factory=list)
 
 
 class CreativePlanRead(BaseModel):
@@ -86,6 +111,13 @@ class PromptPayload(BaseModel):
     size: str
     style: str
     product_consistency_notes: str
+
+
+class PromptPackPayload(PromptPayload):
+    platform: str
+    generation_mode: str
+    reference_strength: float = Field(default=0.72, ge=0, le=1)
+    consistency_rules: list[str] = Field(default_factory=list)
 
 
 class GenerateImagesRequest(BaseModel):
@@ -113,27 +145,36 @@ class GeneratedImageRead(BaseModel):
     id: int
     task_id: int
     project_id: int
+    plan_id: int | None = None
+    platform: str | None = None
+    generation_mode: str | None = None
+    prompt_pack_id: str | None = None
     image_url: str
     image_path: str
     width: int | None
     height: int | None
     score: float | None
     is_selected: bool
+    is_recommended: bool = False
     created_at: datetime
 
 
 class GeneratedImagesResponse(BaseModel):
     task: GenerationTaskRead
-    prompt: PromptPayload
+    prompt: PromptPackPayload
     images: list[GeneratedImageRead]
 
 
 class ImageReviewPayload(BaseModel):
     overall_score: int
     product_clarity: int
+    product_consistency: int = 80
     style_match: int
     commercial_value: int
     platform_fit: int
+    text_artifact_risk: str = "low"
+    ai_artifact_risk: str = "low"
+    recommendation_level: str = "usable"
     defects: list[str]
     suggestions: list[str]
 
@@ -156,6 +197,7 @@ class CopywritingPayload(BaseModel):
     xiaohongshu_text: str
     moments_text: str
     taobao_text: str
+    douyin_script: str = ""
     tags: list[str]
 
 
@@ -207,7 +249,7 @@ class RevisionResponse(BaseModel):
     revision_type: str
     target: str
     modification_plan: list[str]
-    new_prompt: PromptPayload
+    new_prompt: PromptPackPayload
     should_regenerate: bool
     notes: str
 
@@ -230,6 +272,8 @@ class WorkflowEventRead(BaseModel):
 
 class ProjectDetail(ProjectRead):
     assets: list[ProductAssetRead]
+    visual_analysis: ProductVisualAnalysisRead | None = None
+    product_strategy: ProductAnalysisRead | None = None
     latest_analysis: ProductAnalysisRead | None
     creative_plans: list[CreativePlanRead]
     generated_images: list[GeneratedImageRead]

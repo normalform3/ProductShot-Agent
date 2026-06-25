@@ -74,6 +74,10 @@ class CopywritingAgent:
                 f"{project.product_name}，主打{plan.main_selling_point}。画面采用{plan.visual_style}，"
                 "突出商品主体和使用场景，适合作为商品主图、详情页首屏和活动素材。"
             ),
+            douyin_script=(
+                f"今天给大家看这款{project.product_name}，核心亮点是{plan.main_selling_point}。"
+                f"画面会突出{plan.visual_style}，适合快速展示使用场景和购买理由。"
+            ),
             tags=tags,
         )
 

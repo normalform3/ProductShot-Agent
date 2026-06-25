@@ -4,7 +4,7 @@ from app.agents.llm import generate_payload
 from app.agents.prompt_engineer import PromptEngineerAgent
 from app.models import Project
 from app.providers import TextProvider, get_text_provider
-from app.schemas import CreativePlanPayload, PromptPayload, RevisionResponse
+from app.schemas import CreativePlanPayload, PromptPackPayload, RevisionResponse
 
 
 class RevisionAgent:
@@ -44,12 +44,16 @@ class RevisionAgent:
             return model_payload
 
         revision_type = self._classify(instruction)
-        new_prompt = PromptPayload(
+        new_prompt = PromptPackPayload(
             positive_prompt=f"{base_prompt.positive_prompt} Revision request: {instruction}.",
             negative_prompt=base_prompt.negative_prompt,
             size=base_prompt.size,
             style=plan.visual_style,
             product_consistency_notes=base_prompt.product_consistency_notes,
+            platform=base_prompt.platform,
+            generation_mode="image_to_image" if revision_type in {"image", "style", "platform", "prompt", "creative_plan"} else base_prompt.generation_mode,
+            reference_strength=base_prompt.reference_strength,
+            consistency_rules=base_prompt.consistency_rules,
         )
         should_regenerate = revision_type in {"image", "style", "platform", "prompt", "creative_plan"}
         return RevisionResponse(

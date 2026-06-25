@@ -4,13 +4,14 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import router
 from app.config import settings
-from app.database import Base, engine
+from app.database import Base, engine, ensure_sqlite_compat_schema
 from app import models  # noqa: F401
 
 
 def create_app() -> FastAPI:
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
+    ensure_sqlite_compat_schema()
     app = FastAPI(title=settings.app_name)
     app.add_middleware(
         CORSMiddleware,
@@ -30,4 +31,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

@@ -18,6 +18,27 @@
       <div class="studio-workspace">
         <WorkflowStepper :steps="store.steps" />
 
+        <section v-if="store.progress.active" class="panel panel-pad progress-panel">
+          <div class="progress-head">
+            <div>
+              <p class="section-kicker">Agent Progress</p>
+              <h2 class="section-title">正在生成创意方向</h2>
+            </div>
+            <span class="metric-pill accent">{{ Math.round(store.progress.percent) }}%</span>
+          </div>
+          <el-progress :percentage="Math.round(store.progress.percent)" :show-text="false" />
+          <p class="progress-message">{{ store.progress.message }}</p>
+          <div class="progress-items">
+            <div v-for="item in store.progress.items" :key="item.key" class="progress-item" :class="item.status">
+              <span class="status-dot" :class="item.status"></span>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <p>{{ item.detail }}</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <div class="studio-grid">
           <main class="studio-main">
         <section class="panel panel-pad studio-section">
@@ -123,12 +144,21 @@
               :loading="runningAnalysis"
               @click="runWorkflow"
             >
-              {{ store.current?.latest_analysis ? '重新分析并生成方案' : '运行分析与方案' }}
+              {{ store.current?.creative_plans.length ? '重新分析并生成方向' : '分析并生成方向' }}
             </el-button>
           </div>
 
           <el-skeleton v-if="store.loading && hasProject" :rows="5" animated />
           <template v-else-if="store.current?.latest_analysis">
+            <div v-if="store.current.visual_analysis" class="visual-summary">
+              <h3>原图理解</h3>
+              <p>{{ store.current.visual_analysis.analysis.product_appearance }}</p>
+              <div class="tag-row">
+                <el-tag v-for="item in store.current.visual_analysis.analysis.fidelity_constraints" :key="item">
+                  {{ item }}
+                </el-tag>
+              </div>
+            </div>
             <p class="analysis-lead">{{ store.current.latest_analysis.analysis.target_audience_analysis }}</p>
             <div class="tag-row">
               <el-tag v-for="item in store.current.latest_analysis.analysis.recommended_selling_points" :key="item">
@@ -152,7 +182,7 @@
               </div>
             </div>
           </template>
-          <el-empty v-else description="创建项目后，在这里运行商品分析并生成创意方案" />
+          <el-empty v-else description="创建项目后，先分析原图和商品信息，再生成 3 个创意方向" />
         </section>
 
         <section class="panel panel-pad studio-section">
@@ -191,6 +221,10 @@
                   <dt>文案方向</dt>
                   <dd>{{ plan.plan.copywriting_direction }}</dd>
                 </div>
+                <div v-if="plan.plan.expected_outputs.length">
+                  <dt>预计产出</dt>
+                  <dd>{{ plan.plan.expected_outputs.join('、') }}</dd>
+                </div>
               </dl>
               <el-button
                 class="orange-button"
@@ -213,16 +247,16 @@
           <div class="section-head">
             <div>
               <p class="section-kicker">Generated assets</p>
-              <h2 class="section-title">生成图片与评分</h2>
+              <h2 class="section-title">当前方向素材</h2>
             </div>
-            <span v-if="store.current?.generated_images.length" class="metric-pill accent">
-              {{ store.current.generated_images.length }} 张图片
+            <span v-if="filteredImages.length" class="metric-pill accent">
+              {{ filteredImages.length }} 张图片
             </span>
           </div>
 
-          <div v-if="store.current?.generated_images.length" class="image-grid">
+          <div v-if="filteredImages.length" class="image-grid">
             <article
-              v-for="image in store.current.generated_images"
+              v-for="image in filteredImages"
               :key="image.id"
               class="generated-card"
               :class="{ selected: selectedImageId === image.id }"
@@ -233,8 +267,10 @@
               </div>
               <div class="score-row">
                 <strong>{{ image.score ? `${image.score} 分` : '待评分' }}</strong>
+                <el-tag v-if="image.is_recommended" type="success">推荐</el-tag>
                 <el-button text type="primary" @click.stop="review(image)">重新评分</el-button>
               </div>
+              <p class="image-meta">{{ image.platform || '默认平台' }} · {{ image.generation_mode || 'image_to_image' }}</p>
             </article>
           </div>
           <el-empty v-else description="选择一个创意方案后，图片、评分和文案会连续生成" />
@@ -263,6 +299,9 @@
                   <el-tab-pane label="淘宝">
                     <p>{{ store.current.latest_copywriting.copywriting.taobao_text }}</p>
                   </el-tab-pane>
+                  <el-tab-pane label="抖音">
+                    <p>{{ store.current.latest_copywriting.copywriting.douyin_script }}</p>
+                  </el-tab-pane>
                 </el-tabs>
                 <el-tag v-for="tag in store.current.latest_copywriting.copywriting.tags" :key="tag">{{ tag }}</el-tag>
               </template>
@@ -279,7 +318,7 @@
               <el-button
                 class="orange-button"
                 type="primary"
-                :disabled="!hasProject || !store.current?.generated_images.length"
+                :disabled="!hasProject || !filteredImages.length"
                 :loading="revising"
                 @click="revise"
               >
@@ -394,7 +433,7 @@
             :loading="generatingPlanId === store.current?.creative_plans[0]?.id"
             @click="generateFirstPlan"
           >
-            生成素材
+            选择第一个方向生成
           </el-button>
           <div v-else class="export-actions">
             <el-button :href="markdownExportUrl(projectId)" tag="a" target="_blank">Markdown</el-button>
@@ -440,6 +479,7 @@ const localPreviewUrl = ref('')
 const instruction = ref('')
 const revision = ref<RevisionResponse | null>(null)
 const selectedImageId = ref<number | null>(null)
+const selectedPlanId = ref<number | null>(null)
 
 const form = reactive({
   product_name: '',
@@ -459,9 +499,15 @@ const hasProject = computed(() => Number.isFinite(projectId.value) && projectId.
 const primaryAsset = computed(() => store.current?.assets.find((asset) => asset.is_primary) || store.current?.assets[0])
 const selectedImage = computed(
   () =>
-    store.current?.generated_images.find((image) => image.id === selectedImageId.value) ||
-    store.current?.generated_images[0]
+    filteredImages.value.find((image) => image.id === selectedImageId.value) ||
+    filteredImages.value.find((image) => image.is_recommended) ||
+    filteredImages.value[0]
 )
+const filteredImages = computed(() => {
+  const images = store.current?.generated_images || []
+  if (!selectedPlanId.value) return images
+  return images.filter((image) => image.plan_id === selectedPlanId.value)
+})
 const previewImageUrl = computed(() => {
   if (localPreviewUrl.value) return localPreviewUrl.value
   return primaryAsset.value ? assetUrl(primaryAsset.value.file_url) : ''
@@ -474,10 +520,10 @@ const pageDescription = computed(() =>
 )
 const nextAction = computed(() => {
   if (!store.current?.latest_analysis) {
-    return { kind: 'analysis', title: '先理解商品', description: '运行商品分析后，系统会自动给出创意方案。' }
+    return { kind: 'analysis', title: '先理解商品', description: '分析原图和商品信息后，系统会先给出 3 个方向。' }
   }
-  if (!store.current.generated_images.length) {
-    return { kind: 'plan', title: '选择方案生成', description: '可以从创意方案里挑一个方向，连续生成图片、评分和文案。' }
+  if (!filteredImages.value.length) {
+    return { kind: 'plan', title: '选择方向生成', description: '从 3 个方向里挑一个，再生成该方向的图片、评分和文案。' }
   }
   return { kind: 'export', title: '素材包已成形', description: '继续修改，或直接导出 Markdown / JSON 素材报告。' }
 })
@@ -499,13 +545,16 @@ async function loadFromRoute() {
   if (!hasProject.value) {
     store.resetCurrent()
     selectedImageId.value = null
+    selectedPlanId.value = null
     return
   }
   localPreviewUrl.value = ''
   selectedFile.value = null
   try {
     await store.load(projectId.value)
-    selectedImageId.value = store.current?.generated_images[0]?.id || null
+    const recommended = store.current?.generated_images.find((image) => image.is_recommended)
+    selectedPlanId.value = recommended?.plan_id || store.current?.generated_images[0]?.plan_id || null
+    selectedImageId.value = recommended?.id || store.current?.generated_images[0]?.id || null
   } catch (error) {
     ElMessage.error(errorMessage(error))
   }
@@ -557,9 +606,11 @@ async function runWorkflow() {
 async function selectPlan(plan: CreativePlan) {
   if (!hasProject.value) return
   generatingPlanId.value = plan.id
+  selectedPlanId.value = plan.id
   try {
     await store.generateFromPlan(projectId.value, plan)
-    selectedImageId.value = store.current?.generated_images[0]?.id || null
+    selectedImageId.value =
+      filteredImages.value.find((image) => image.is_recommended)?.id || filteredImages.value[0]?.id || null
     ElMessage.success('图片、评分和文案已生成')
   } catch (error) {
     ElMessage.error(errorMessage(error))
@@ -617,12 +668,13 @@ function statusLabel(status: string) {
 
 function stepLabel(stepKey: string) {
   const labels: Record<string, string> = {
-    analysis: '商品分析',
-    plans: '创意策划',
+    visual_analysis: '原图理解',
+    analysis: '商品策略',
+    plans: '方向规划',
     prompt: 'Prompt 构建',
-    images: '图片生成',
-    review: '图片评价',
-    copy: '文案生成',
+    images: '素材生成',
+    review: '质量评价',
+    copy: '发布文案',
     revision: '修改计划'
   }
   return labels[stepKey] || stepKey
@@ -674,6 +726,74 @@ function eventDetailText(event: WorkflowEvent) {
   gap: 14px;
   margin-top: 14px;
   align-items: start;
+}
+
+.progress-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  border-color: rgba(201, 93, 66, 0.22);
+  background:
+    linear-gradient(90deg, rgba(201, 93, 66, 0.08), transparent 46%),
+    var(--ps-surface);
+}
+
+.progress-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progress-head .section-title {
+  margin-bottom: 0;
+}
+
+.progress-message {
+  margin: 0;
+  color: var(--ps-muted-strong);
+  line-height: 1.65;
+}
+
+.progress-items {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.progress-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 9px;
+  min-height: 78px;
+  padding: 10px;
+  border: 1px solid var(--ps-border);
+  border-radius: var(--ps-radius);
+  background: var(--ps-surface-quiet);
+}
+
+.progress-item.running {
+  border-color: rgba(201, 93, 66, 0.42);
+}
+
+.progress-item.success {
+  border-color: rgba(36, 88, 70, 0.28);
+}
+
+.progress-item.failed {
+  border-color: rgba(183, 65, 53, 0.38);
+}
+
+.progress-item strong {
+  color: var(--ps-heading);
+  font-size: 13px;
+}
+
+.progress-item p {
+  margin: 4px 0 0;
+  color: var(--ps-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .studio-main,
@@ -763,6 +883,20 @@ dd {
   margin: 0 0 14px;
   color: var(--ps-muted-strong);
   line-height: 1.75;
+}
+
+.visual-summary {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid rgba(36, 88, 70, 0.14);
+  border-radius: var(--ps-radius);
+  background: var(--ps-surface-soft);
+}
+
+.visual-summary p {
+  margin: 0 0 10px;
+  color: var(--ps-muted-strong);
+  line-height: 1.7;
 }
 
 .tag-row {
@@ -862,6 +996,12 @@ ul {
 
 .score-row strong {
   color: var(--ps-primary);
+}
+
+.image-meta {
+  margin: 0;
+  color: var(--ps-muted);
+  font-size: 12px;
 }
 
 .copy-revision-grid p,
@@ -1003,7 +1143,8 @@ ul {
 @media (max-width: 760px) {
   .studio-header,
   .section-head,
-  .rail-card-head {
+  .rail-card-head,
+  .progress-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -1011,9 +1152,10 @@ ul {
   .form-grid,
   .analysis-grid,
   .brief-summary,
-  .copy-revision-grid,
-  .image-grid,
-  .trace-detail dl {
+    .copy-revision-grid,
+    .image-grid,
+    .progress-items,
+    .trace-detail dl {
     grid-template-columns: 1fr;
   }
 

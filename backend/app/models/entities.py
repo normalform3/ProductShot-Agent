@@ -29,6 +29,7 @@ class Project(Base):
 
     assets: Mapped[list["ProductAsset"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     analyses: Mapped[list["ProductAnalysis"]] = relationship(cascade="all, delete-orphan", back_populates="project")
+    visual_analyses: Mapped[list["ProductVisualAnalysis"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     creative_plans: Mapped[list["CreativePlan"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     generation_tasks: Mapped[list["GenerationTask"]] = relationship(cascade="all, delete-orphan", back_populates="project")
     generated_images: Mapped[list["GeneratedImage"]] = relationship(cascade="all, delete-orphan", back_populates="project")
@@ -61,6 +62,17 @@ class ProductAnalysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="analyses")
+
+
+class ProductVisualAnalysis(Base):
+    __tablename__ = "product_visual_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    analysis_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="visual_analyses")
 
 
 class CreativePlan(Base):
@@ -105,12 +117,18 @@ class GeneratedImage(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("generation_tasks.id"), nullable=False, index=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    plan_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    platform: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    generation_mode: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    prompt_pack_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    prompt_pack_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_url: Mapped[str] = mapped_column(String(500), nullable=False)
     image_path: Mapped[str] = mapped_column(String(500), nullable=False)
     width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_recommended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     task: Mapped[GenerationTask] = relationship(back_populates="images")
@@ -126,9 +144,13 @@ class ImageReview(Base):
     image_id: Mapped[int] = mapped_column(ForeignKey("generated_images.id"), nullable=False, index=True)
     overall_score: Mapped[int] = mapped_column(Integer, nullable=False)
     product_clarity_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    product_consistency_score: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
     style_match_score: Mapped[int] = mapped_column(Integer, nullable=False)
     commercial_value_score: Mapped[int] = mapped_column(Integer, nullable=False)
     platform_fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    text_artifact_risk: Mapped[str] = mapped_column(String(40), default="low", nullable=False)
+    ai_artifact_risk: Mapped[str] = mapped_column(String(40), default="low", nullable=False)
+    recommendation_level: Mapped[str] = mapped_column(String(40), default="usable", nullable=False)
     defects_json: Mapped[str] = mapped_column(Text, nullable=False)
     suggestions_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -148,6 +170,7 @@ class Copywriting(Base):
     xiaohongshu_text: Mapped[str] = mapped_column(Text, nullable=False)
     moments_text: Mapped[str] = mapped_column(Text, nullable=False)
     taobao_text: Mapped[str] = mapped_column(Text, nullable=False)
+    douyin_script: Mapped[str] = mapped_column(Text, default="", nullable=False)
     tags_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 

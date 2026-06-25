@@ -5,7 +5,7 @@ import json
 from app.agents.llm import generate_payload
 from app.models import Project
 from app.providers import TextProvider, get_text_provider
-from app.schemas import ProductAnalysisPayload
+from app.schemas import ProductAnalysisPayload, VisualAnalysisPayload
 
 
 class ProductAnalysisAgent:
@@ -14,7 +14,7 @@ class ProductAnalysisAgent:
     def __init__(self, text_provider: TextProvider | None = None) -> None:
         self.text_provider = text_provider or get_text_provider()
 
-    def run(self, project: Project, image_path: str | None = None) -> ProductAnalysisPayload:
+    def run(self, project: Project, image_path: str | None = None, visual: VisualAnalysisPayload | None = None) -> ProductAnalysisPayload:
         model_payload = generate_payload(
             provider=self.text_provider,
             payload_type=ProductAnalysisPayload,
@@ -31,6 +31,7 @@ class ProductAnalysisAgent:
                     "target_audience": project.target_audience,
                     "preferred_style": project.preferred_style,
                     "has_source_image": bool(image_path),
+                    "visual_analysis": visual.model_dump() if visual else None,
                     "required_fields": ProductAnalysisPayload.model_json_schema(),
                 },
                 ensure_ascii=False,
@@ -45,10 +46,10 @@ class ProductAnalysisAgent:
         style = project.preferred_style or "清爽高级风"
         selling_points = self._split_points(project.core_selling_points)
         if not selling_points:
-            selling_points = ["实用好搭配", "适合日常使用", "适合作为礼物"]
+            selling_points = (visual.marketing_opportunities[:3] if visual else []) or ["实用好搭配", "适合日常使用", "适合作为礼物"]
 
-        issues = ["原图背景可能分散注意力", "需要进一步突出商品主体"]
-        if image_path:
+        issues = list(visual.background_issues) if visual else ["原图背景可能分散注意力", "需要进一步突出商品主体"]
+        if image_path and "建议在生成图中保持原商品外观和标签一致" not in issues:
             issues.append("建议在生成图中保持原商品外观和标签一致")
 
         return ProductAnalysisPayload(
@@ -57,6 +58,7 @@ class ProductAnalysisAgent:
                 f"商品名称为「{project.product_name}」",
                 f"目标平台是{project.target_platform}",
                 f"偏好的视觉方向是{style}",
+                visual.product_appearance if visual else "商品主体需要在生成图中清晰呈现",
             ],
             target_audience_analysis=f"{audience}更容易被清晰卖点、生活化场景和可信的使用理由打动。",
             recommended_selling_points=selling_points[:4],
@@ -67,6 +69,9 @@ class ProductAnalysisAgent:
                 "再用卖点降低购买决策成本",
                 "最后用平台化文案提升点击和收藏意愿",
             ],
+            visual_summary=visual.product_appearance if visual else None,
+            product_consistency_rules=visual.fidelity_constraints if visual else [],
+            platform_strategy=f"围绕{project.target_platform}首图/封面场景，优先突出商品主体和可信卖点。",
         )
 
     def _split_points(self, raw: str | None) -> list[str]:

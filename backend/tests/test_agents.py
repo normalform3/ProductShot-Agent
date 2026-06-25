@@ -1,15 +1,18 @@
 from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.agents import CreativePlannerAgent, ProductAnalysisAgent, RevisionAgent
+from app.agents import CreativePlannerAgent, ProductAnalysisAgent, RevisionAgent, VisualAnalysisAgent
 from app.api.routes import test_text_model_connection as run_text_model_connection_test
 from app.config import settings
 from app.database import Base
-from app.models import Project, WorkflowEvent
+from app.models import Copywriting, Project, WorkflowEvent
 from app.providers import get_text_provider
 from app.providers.dashscope_text_provider import DashscopeTextProvider
+from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.mock_image_provider import MockImageProvider
 from app.providers.text_provider import TextProviderUnavailable
 from app.services import ProductShotWorkflow
@@ -29,11 +32,13 @@ def sample_project() -> Project:
 
 def test_product_analysis_agent_outputs_structured_marketing_context():
     project = sample_project()
-    result = ProductAnalysisAgent().run(project)
+    visual = VisualAnalysisAgent().run(project, "source.png")
+    result = ProductAnalysisAgent().run(project, "source.png", visual)
 
     assert result.product_type == "家居香氛类商品"
     assert "手工制作" in result.recommended_selling_points
     assert result.image_issues
+    assert result.product_consistency_rules
 
 
 def test_creative_planner_agent_returns_three_plans():
@@ -42,7 +47,8 @@ def test_creative_planner_agent_returns_three_plans():
     plans = CreativePlannerAgent().run(project, analysis)
 
     assert len(plans) == 3
-    assert {plan.plan_name for plan in plans} == {"高级极简白底风", "小红书生活方式风", "节日礼物促销风"}
+    assert {plan.plan_name for plan in plans} == {"电商质感主图", "社媒生活方式封面", "促销礼物海报"}
+    assert all(plan.expected_outputs for plan in plans)
 
 
 def test_revision_agent_classifies_copywriting_request():
@@ -100,6 +106,98 @@ def test_dashscope_text_provider_requires_environment_key():
         settings.dashscope_api_key = original_key
 
 
+def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
+    calls = {}
+    dashscope_module = ModuleType("dashscope")
+    dashscope_module.base_http_api_url = ""
+
+    class FakeMultiModalConversation:
+        @staticmethod
+        def call(**kwargs):
+            calls["kwargs"] = kwargs
+            return SimpleNamespace(
+                output=SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=[{"text": '{"ok": true}'}])
+                        )
+                    ]
+                )
+            )
+
+    dashscope_module.MultiModalConversation = FakeMultiModalConversation
+    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
+
+    original_key = settings.dashscope_api_key
+    original_base = settings.dashscope_base_http_api_url
+    try:
+        settings.dashscope_api_key = "test-key"
+        settings.dashscope_base_http_api_url = "https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1"
+        provider = DashscopeTextProvider()
+        result = provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test")
+    finally:
+        settings.dashscope_api_key = original_key
+        settings.dashscope_base_http_api_url = original_base
+
+    assert result == {"ok": True}
+    assert dashscope_module.base_http_api_url == "https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1"
+    assert calls["kwargs"]["model"] == settings.text_model
+    assert calls["kwargs"]["messages"][0]["content"][0]["text"]
+
+
+def test_dashscope_image_provider_uses_image_generation_sdk(monkeypatch, tmp_path: Path):
+    calls = {}
+    dashscope_module = ModuleType("dashscope")
+    dashscope_module.base_http_api_url = ""
+    image_generation_module = ModuleType("dashscope.aigc.image_generation")
+    response_module = ModuleType("dashscope.api_entities.dashscope_response")
+
+    class FakeImageGeneration:
+        @staticmethod
+        def call(**kwargs):
+            calls["kwargs"] = kwargs
+            return SimpleNamespace(output=SimpleNamespace(results=[{"url": "https://example.com/generated.png"}]))
+
+    class FakeMessage:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    image_generation_module.ImageGeneration = FakeImageGeneration
+    response_module.Message = FakeMessage
+    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
+    monkeypatch.setitem(sys.modules, "dashscope.aigc", ModuleType("dashscope.aigc"))
+    monkeypatch.setitem(sys.modules, "dashscope.aigc.image_generation", image_generation_module)
+    monkeypatch.setitem(sys.modules, "dashscope.api_entities", ModuleType("dashscope.api_entities"))
+    monkeypatch.setitem(sys.modules, "dashscope.api_entities.dashscope_response", response_module)
+
+    def fake_download(self, image_url, target):
+        target.write_bytes(b"image")
+
+    monkeypatch.setattr(DashscopeImageProvider, "_download_image", fake_download)
+    source = tmp_path / "source.png"
+    source.write_bytes(b"source")
+
+    original_key = settings.dashscope_api_key
+    try:
+        settings.dashscope_api_key = "test-key"
+        provider = DashscopeImageProvider()
+        results = provider.generate_images(
+            project_id=123,
+            source_image_path=str(source),
+            positive_prompt="prompt",
+            negative_prompt="negative",
+            size="1024x1024",
+            count=1,
+        )
+    finally:
+        settings.dashscope_api_key = original_key
+
+    assert len(results) == 1
+    assert calls["kwargs"]["model"] == "wan2.7-image-pro"
+    assert calls["kwargs"]["size"] == "2K"
+    assert calls["kwargs"]["messages"][0].kwargs["content"][0]["image"].startswith("file://")
+
+
 def test_model_connection_test_returns_success_for_mock_provider():
     original_provider = settings.text_provider
     try:
@@ -146,7 +244,55 @@ def test_workflow_records_persistent_agent_event():
 
         events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
 
-    assert len(events) == 1
-    assert events[0].step_key == "analysis"
-    assert events[0].status == "success"
-    assert events[0].latency_ms is not None
+    assert {event.step_key for event in events} == {"visual_analysis", "analysis"}
+    assert all(event.status == "success" for event in events)
+    assert all(event.latency_ms is not None for event in events)
+
+
+def test_plan_stage_creates_three_directions_without_generation_tasks():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        project = sample_project()
+        project.id = None
+        project.status = "draft"
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+
+        workflow = ProductShotWorkflow(db)
+        plans = workflow.plan(project)
+
+        task_count = len(project.generation_tasks)
+        events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
+
+    assert len(plans) == 3
+    assert task_count == 0
+    assert {event.step_key for event in events} == {"visual_analysis", "analysis", "plans"}
+
+
+def test_generate_pack_uses_selected_plan_and_creates_review_and_copy():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        project = sample_project()
+        project.id = None
+        project.status = "draft"
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+
+        workflow = ProductShotWorkflow(db)
+        workflow.plan(project)
+        selected_plan = project.creative_plans[1]
+        selected_plan_id = selected_plan.id
+        result = workflow.generate_pack(project, selected_plan, 2)
+        copy_count = db.query(Copywriting).filter(Copywriting.project_id == project.id).count()
+        db.refresh(project)
+
+    assert len(result.images) == 2
+    assert all(image.plan_id == selected_plan_id for image in result.images)
+    assert any(image.is_recommended for image in result.images)
+    assert copy_count == 1

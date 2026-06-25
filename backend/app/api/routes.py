@@ -82,9 +82,13 @@ def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettingsRead:
     if "image_model" in updates and updates["image_model"]:
         settings.dashscope_image_model = updates["image_model"]
     if "dashscope_text_base_url" in updates and updates["dashscope_text_base_url"]:
-        settings.dashscope_text_base_url = updates["dashscope_text_base_url"].rstrip("/")
+        settings.dashscope_base_http_api_url = updates["dashscope_text_base_url"].rstrip("/")
+        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
+        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
     if "dashscope_image_generation_url" in updates and updates["dashscope_image_generation_url"]:
-        settings.dashscope_image_generation_url = updates["dashscope_image_generation_url"]
+        settings.dashscope_base_http_api_url = updates["dashscope_image_generation_url"].rstrip("/")
+        settings.dashscope_text_base_url = settings.dashscope_base_http_api_url
+        settings.dashscope_image_generation_url = settings.dashscope_base_http_api_url
     return _model_settings_read()
 
 
@@ -137,8 +141,8 @@ def _model_settings_read() -> ModelSettingsRead:
         text_model=settings.text_model,
         image_provider=settings.image_provider,
         image_model=settings.dashscope_image_model,
-        dashscope_text_base_url=settings.dashscope_text_base_url,
-        dashscope_image_generation_url=settings.dashscope_image_generation_url,
+        dashscope_text_base_url=settings.dashscope_base_http_api_url,
+        dashscope_image_generation_url=settings.dashscope_base_http_api_url,
         dashscope_workspace_id_configured=bool(settings.dashscope_workspace_id),
         dashscope_api_key_configured=bool(settings.dashscope_api_key),
         available_text_providers=sorted(TEXT_PROVIDERS),
@@ -164,6 +168,7 @@ def list_projects(db: Session = Depends(get_db)) -> list[Project]:
 def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail:
     project = get_project_or_404(db, project_id)
     workflow = ProductShotWorkflow(db)
+    latest_visual = workflow.latest_visual_analysis(project_id)
     latest_analysis = workflow.latest_analysis(project_id)
     latest_copy = project.copywriting_items[-1] if project.copywriting_items else None
     workflow_events = (
@@ -176,6 +181,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)) -> ProjectDetail
     return ProjectDetail(
         **ProjectRead.model_validate(project).model_dump(),
         assets=[ProductAssetRead.model_validate(item) for item in project.assets],
+        visual_analysis=workflow.visual_analysis_read(latest_visual) if latest_visual else None,
+        product_strategy=workflow.analysis_read(latest_analysis) if latest_analysis else None,
         latest_analysis=workflow.analysis_read(latest_analysis) if latest_analysis else None,
         creative_plans=[workflow.creative_plan_read(item) for item in project.creative_plans],
         generated_images=[GeneratedImageRead.model_validate(item) for item in project.generated_images],
@@ -232,6 +239,12 @@ def generate_plans(project_id: int, db: Session = Depends(get_db)) -> list[Creat
     return ProductShotWorkflow(db).generate_plans(project)
 
 
+@router.post("/projects/{project_id}/agent/plan", response_model=list[CreativePlanRead])
+def plan_project(project_id: int, db: Session = Depends(get_db)) -> list[CreativePlanRead]:
+    project = get_project_or_404(db, project_id)
+    return ProductShotWorkflow(db).plan(project)
+
+
 @router.get("/projects/{project_id}/creative-plans", response_model=list[CreativePlanRead])
 def list_plans(project_id: int, db: Session = Depends(get_db)) -> list[CreativePlanRead]:
     get_project_or_404(db, project_id)
@@ -255,6 +268,23 @@ def generate_images(
         return ProductShotWorkflow(db).generate_images(project, plan, payload.count)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"图片生成失败：{exc}") from exc
+
+
+@router.post("/projects/{project_id}/creative-plans/{plan_id}/generate-pack", response_model=GeneratedImagesResponse)
+def generate_pack(
+    project_id: int,
+    plan_id: int,
+    payload: GenerateImagesRequest,
+    db: Session = Depends(get_db),
+) -> GeneratedImagesResponse:
+    project = get_project_or_404(db, project_id)
+    plan = db.query(CreativePlan).filter(CreativePlan.id == plan_id, CreativePlan.project_id == project_id).first()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="创意方案不存在")
+    try:
+        return ProductShotWorkflow(db).generate_pack(project, plan, payload.count)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"素材包生成失败：{exc}") from exc
 
 
 @router.get("/projects/{project_id}/generated-images", response_model=list[GeneratedImageRead])

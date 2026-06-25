@@ -4,8 +4,10 @@ from app.agents.image_critic import ImageCriticAgent
 from app.agents.product_analysis import ProductAnalysisAgent
 from app.agents.prompt_engineer import PromptEngineerAgent
 from app.agents.revision import RevisionAgent
+from app.agents.visual_analysis import VisualAnalysisAgent
 
 __all__ = [
+    "VisualAnalysisAgent",
     "ProductAnalysisAgent",
     "CreativePlannerAgent",
     "PromptEngineerAgent",
@@ -13,4 +15,3 @@ __all__ = [
     "CopywritingAgent",
     "RevisionAgent",
 ]
-

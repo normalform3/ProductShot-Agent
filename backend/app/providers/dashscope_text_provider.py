@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
-
-import httpx
 
 from app.config import settings
 from app.providers.text_provider import TextProviderError, TextProviderUnavailable
@@ -15,7 +14,7 @@ class DashscopeTextProvider:
     def __init__(self) -> None:
         self.api_key = settings.dashscope_api_key
         self.model = settings.text_model
-        self.base_url = settings.dashscope_text_base_url.rstrip("/")
+        self.base_url = settings.dashscope_base_http_api_url.rstrip("/")
 
     def generate_json(
         self,
@@ -28,47 +27,69 @@ class DashscopeTextProvider:
         if not self.api_key:
             raise TextProviderUnavailable("DASHSCOPE_API_KEY is not configured.")
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"{system_prompt}\n\n"
-                        f"Return only valid JSON for the {schema_name} schema. "
-                        "Do not wrap the JSON in Markdown."
-                    ),
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        content = [
+            {
+                "text": (
+                    f"{system_prompt}\n\n"
+                    f"Return only valid JSON for the {schema_name} schema. Do not wrap the JSON in Markdown.\n\n"
+                    f"User input:\n{user_prompt}"
+                )
+            }
+        ]
+        response = self._call_multimodal(content=content)
+        return self._parse_json_content(self._response_text(response))
 
+    def generate_multimodal_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: str,
+        schema_name: str,
+        temperature: float = 0.2,
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise TextProviderUnavailable("DASHSCOPE_API_KEY is not configured.")
+
+        content = [
+            {"image": self._image_reference(image_path)},
+            {
+                "text": (
+                    f"{system_prompt}\n\n"
+                    f"Return only valid JSON for the {schema_name} schema. Do not wrap the JSON in Markdown.\n\n"
+                    f"User input:\n{user_prompt}"
+                )
+            },
+        ]
+        response = self._call_multimodal(content=content)
+        return self._parse_json_content(self._response_text(response))
+
+    def _call_multimodal(self, *, content: list[dict[str, str]]):
         try:
-            response = httpx.post(
-                f"{self.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=settings.model_request_timeout,
+            import dashscope
+        except ImportError as exc:
+            raise TextProviderUnavailable("dashscope package is not installed. Run `pip install -r requirements.txt`.") from exc
+
+        dashscope.base_http_api_url = self.base_url
+        try:
+            return dashscope.MultiModalConversation.call(
+                api_key=self.api_key,
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
             )
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPError as exc:
-            raise TextProviderError(f"DashScope text request failed: {exc}") from exc
-        except ValueError as exc:
-            raise TextProviderError("DashScope text response was not valid JSON.") from exc
+        except Exception as exc:
+            raise TextProviderError(f"DashScope SDK request failed: {exc}") from exc
 
+    def _response_text(self, response: Any) -> str:
         try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise TextProviderError("DashScope text response did not include message content.") from exc
-
-        return self._parse_json_content(content)
+            content = response.output.choices[0].message.content
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise TextProviderError(f"DashScope SDK response did not include message content: {response}") from exc
+        if isinstance(content, list):
+            return "".join(str(item.get("text", "")) if isinstance(item, dict) else str(item) for item in content).strip()
+        if isinstance(content, str):
+            return content.strip()
+        raise TextProviderError("DashScope SDK message content was not text.")
 
     def _parse_json_content(self, content: Any) -> dict[str, Any]:
         if isinstance(content, list):
@@ -92,3 +113,9 @@ class DashscopeTextProvider:
         if not isinstance(parsed, dict):
             raise TextProviderError("DashScope text content must be a JSON object.")
         return parsed
+
+    def _image_reference(self, image_path: str) -> str:
+        path = Path(image_path)
+        if not path.exists():
+            raise TextProviderError("DashScope multimodal image path does not exist.")
+        return path.resolve().as_uri()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -11,6 +13,7 @@ from app.providers.mock_image_provider import MockImageProvider
 
 class DashscopeImageProvider(MockImageProvider):
     name = "dashscope"
+    capabilities = {"text_to_image", "image_to_image", "reference_image"}
 
     def __init__(self) -> None:
         self.api_key = settings.dashscope_api_key
@@ -26,11 +29,12 @@ class DashscopeImageProvider(MockImageProvider):
         negative_prompt = kwargs["negative_prompt"]
         size = kwargs["size"]
         count = kwargs["count"]
+        source_image_path = kwargs.get("source_image_path")
 
         project_dir = settings.generated_dir / str(project_id)
         project_dir.mkdir(parents=True, exist_ok=True)
         provider_size = self._dashscope_size(size)
-        width, height = self._parse_provider_size(provider_size)
+        width, height = self._parse_size(size)
         image_urls: list[str] = []
 
         remaining = count
@@ -42,6 +46,7 @@ class DashscopeImageProvider(MockImageProvider):
                     negative_prompt=negative_prompt,
                     size=provider_size,
                     count=batch_count,
+                    source_image_path=source_image_path,
                 )
             )
             remaining -= batch_count
@@ -67,60 +72,71 @@ class DashscopeImageProvider(MockImageProvider):
         negative_prompt: str,
         size: str,
         count: int,
+        source_image_path: str | None = None,
     ) -> list[str]:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        if settings.dashscope_workspace_id:
-            headers["X-DashScope-WorkSpace"] = settings.dashscope_workspace_id
-        payload = {
-            "model": self.model,
-            "input": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [{"text": positive_prompt}],
-                    }
-                ]
-            },
-            "parameters": {
-                "prompt_extend": True,
-                "watermark": False,
-                "n": count,
-                "negative_prompt": negative_prompt,
-                "size": size,
-            },
-        }
+        try:
+            import dashscope
+            from dashscope.aigc.image_generation import ImageGeneration
+            from dashscope.api_entities.dashscope_response import Message
+        except ImportError as exc:
+            raise RuntimeError("dashscope package is not installed. Run `pip install -r requirements.txt`.") from exc
+
+        dashscope.base_http_api_url = settings.dashscope_base_http_api_url
+        prompt_text = f"{positive_prompt}\n\nNegative constraints: {negative_prompt}"
+        content = [{"text": prompt_text}]
+        source_reference = self._source_image_reference(source_image_path)
+        if source_reference:
+            content.insert(0, {"image": source_reference})
+        message = Message(role="user", content=content)
 
         try:
-            response = httpx.post(
-                self.generation_url,
-                headers=headers,
-                json=payload,
-                timeout=settings.model_request_timeout,
+            response = ImageGeneration.call(
+                model=self.model,
+                api_key=self.api_key,
+                messages=[message],
+                enable_sequential=count > 1,
+                n=count,
+                size=size,
             )
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"DashScope image request failed: {exc}") from exc
-        except ValueError as exc:
-            raise RuntimeError("DashScope image response was not valid JSON.") from exc
+        except Exception as exc:
+            raise RuntimeError(f"DashScope image SDK request failed: {exc}") from exc
 
-        if data.get("code"):
-            raise RuntimeError(f"DashScope image request failed: {data.get('message', data['code'])}")
-
-        images: list[str] = []
-        choices = data.get("output", {}).get("choices", [])
-        for choice in choices:
-            content = choice.get("message", {}).get("content", [])
-            for item in content:
-                image = item.get("image") if isinstance(item, dict) else None
-                if image:
-                    images.append(image)
+        images = self._extract_image_urls(response)
         if not images:
-            raise RuntimeError("DashScope image response did not include generated image URLs.")
+            raise RuntimeError(f"DashScope image response did not include generated image URLs: {response}")
         return images
+
+    def _source_image_reference(self, source_image_path: str | None) -> str | None:
+        if not source_image_path:
+            return None
+        path = Path(source_image_path)
+        if not path.exists():
+            return None
+        return path.resolve().as_uri()
+
+    def _extract_image_urls(self, response: Any) -> list[str]:
+        data = response if isinstance(response, dict) else getattr(response, "output", None)
+        images: list[str] = []
+
+        results = self._get(data, "results", default=[])
+        for item in results or []:
+            url = self._get(item, "url") or self._get(item, "image") or self._get(item, "image_url")
+            if url:
+                images.append(str(url))
+
+        choices = self._get(data, "choices", default=[])
+        for choice in choices or []:
+            content = self._get(self._get(choice, "message", default={}), "content", default=[])
+            for item in content or []:
+                url = self._get(item, "image") or self._get(item, "url") or self._get(item, "image_url")
+                if url:
+                    images.append(str(url))
+        return images
+
+    def _get(self, value: Any, key: str, default=None):
+        if isinstance(value, dict):
+            return value.get(key, default)
+        return getattr(value, key, default)
 
     def _download_image(self, image_url: str, target) -> None:
         try:
@@ -131,18 +147,4 @@ class DashscopeImageProvider(MockImageProvider):
         target.write_bytes(response.content)
 
     def _dashscope_size(self, size: str) -> str:
-        width, height = self._parse_size(size)
-        ratio = width / height if height else 1
-        if 0.95 <= ratio <= 1.05:
-            return "1280*1280"
-        if ratio < 0.62:
-            return "960*1696"
-        if ratio < 0.9:
-            return "1104*1472"
-        if ratio > 1.6:
-            return "1696*960"
-        return "1472*1104" if ratio > 1 else "1104*1472"
-
-    def _parse_provider_size(self, size: str) -> tuple[int, int]:
-        left, right = size.split("*", 1)
-        return int(left), int(right)
+        return "2K"
