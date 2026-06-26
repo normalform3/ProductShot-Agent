@@ -27,7 +27,7 @@ uvicorn app.main:app --reload
 - `TEXT_MODEL`：文字/多模态推理模型，默认 `qwen3.7-plus`。
 - `OPENAI_API_KEY`：OpenAI 图片生成 Provider 骨架预留。
 - `DASHSCOPE_API_KEY`：百炼 API Key，只从系统环境变量读取，不要写入代码或提交到仓库。
-- `DASHSCOPE_BASE_HTTP_API_URL`：百炼 SDK base URL，默认 `https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1`。
+- `DASHSCOPE_BASE_HTTP_API_URL`：百炼 SDK base URL，默认 `https://dashscope.aliyuncs.com/api/v1`。
 - `DASHSCOPE_TEXT_BASE_URL`：兼容旧配置名；未设置 `DASHSCOPE_BASE_HTTP_API_URL` 时会作为 SDK base URL 使用。
 - `DASHSCOPE_IMAGE_MODEL`：百炼文生图模型，默认 `wan2.7-image-pro`。
 - `DASHSCOPE_IMAGE_GENERATION_URL`：兼容旧前端字段；当前 SDK 调用会同步作为 base URL 使用。
@@ -42,10 +42,10 @@ export TEXT_PROVIDER=dashscope
 export IMAGE_PROVIDER=dashscope
 export TEXT_MODEL=qwen3.7-plus
 export DASHSCOPE_IMAGE_MODEL=wan2.7-image-pro
-export DASHSCOPE_BASE_HTTP_API_URL=https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1
+export DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
 ```
 
-不要在 `.env`、README、代码或前端请求中写入真实 Key。前端模型管理页只展示 Key 是否已配置，并允许调整非敏感模型配置。
+不要在 `.env`、README、代码、测试或前端请求中写入真实 Key、个人专属 Base URL、Workspace ID 或业务空间地址。前端模型管理页只展示 Key 是否已配置，并允许调整非敏感模型配置。
 
 ## Mock 说明
 

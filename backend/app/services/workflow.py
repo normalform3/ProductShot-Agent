@@ -45,6 +45,7 @@ from app.schemas import (
     ProjectRead,
     RevisionResponse,
     VisualAnalysisPayload,
+    VisualAnalysisReviewRequest,
     WorkflowEventRead,
 )
 from app.utils.json import dumps, loads
@@ -81,6 +82,7 @@ class ProductShotWorkflow:
         try:
             payload = self.visual_agent.run(project, primary.file_path if primary else None)
             row = ProductVisualAnalysis(project_id=project.id, analysis_json=payload.model_dump_json())
+            project.status = "visual_review"
             self.db.add(row)
             self.db.commit()
             self.db.refresh(row)
@@ -106,6 +108,38 @@ class ProductShotWorkflow:
                 started_at=started_at,
             )
             raise
+
+    def review_visual_analysis(self, project: Project, review: VisualAnalysisReviewRequest) -> ProductVisualAnalysisRead:
+        row = self.latest_visual_analysis(project.id)
+        if row is None:
+            self.ensure_visual_analysis(project)
+            row = self.latest_visual_analysis(project.id)
+        if row is None:
+            raise ValueError("原图理解结果不存在")
+
+        payload = review.analysis.model_copy(
+            update={
+                "human_reviewed": True,
+                "human_review_notes": review.review_notes.strip(),
+            }
+        )
+        row.analysis_json = payload.model_dump_json()
+        project.status = "visual_reviewed"
+        self.db.commit()
+        self.db.refresh(row)
+        self.record_event(
+            project.id,
+            step_key="visual_review",
+            agent_name="Human Reviewer",
+            status="success",
+            summary="人工确认并修正原图理解结果。",
+            detail={
+                "review_notes": payload.human_review_notes,
+                "product_appearance": payload.product_appearance,
+                "fidelity_constraints": payload.fidelity_constraints,
+            },
+        )
+        return self.visual_analysis_read(row)
 
     def analyze(self, project: Project) -> ProductAnalysisRead:
         started_at = utcnow()
@@ -253,6 +287,22 @@ class ProductShotWorkflow:
         self.db.flush()
         prompt_pack_id = f"prompt_{task.id}_{uuid4().hex[:8]}"
         image_started_at = utcnow()
+        self.record_event(
+            project.id,
+            step_key="images",
+            agent_name=f"{provider.name} ImageProvider",
+            status="running",
+            summary="已开始调用真实图片生成服务，正在等待模型排队和出图。",
+            detail={
+                "task_id": task.id,
+                "plan_id": plan.id,
+                "model_name": provider_model,
+                "requested_count": count,
+                "generation_mode": prompt.generation_mode,
+                "size": prompt.size,
+            },
+            started_at=image_started_at,
+        )
         try:
             generated = provider.generate_images(
                 project_id=project.id,

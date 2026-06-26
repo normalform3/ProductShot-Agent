@@ -15,6 +15,7 @@ from app.providers.dashscope_text_provider import DashscopeTextProvider
 from app.providers.dashscope_image_provider import DashscopeImageProvider
 from app.providers.mock_image_provider import MockImageProvider
 from app.providers.text_provider import TextProviderUnavailable
+from app.schemas import VisualAnalysisReviewRequest
 from app.services import ProductShotWorkflow
 
 
@@ -106,6 +107,28 @@ def test_dashscope_text_provider_requires_environment_key():
         settings.dashscope_api_key = original_key
 
 
+def test_dashscope_image_provider_requires_environment_key():
+    original_key = settings.dashscope_api_key
+    try:
+        settings.dashscope_api_key = None
+        provider = DashscopeImageProvider()
+        try:
+            provider.generate_images(
+                project_id=123,
+                source_image_path=None,
+                positive_prompt="prompt",
+                negative_prompt="negative",
+                size="1024x1024",
+                count=1,
+            )
+        except RuntimeError as exc:
+            assert "DASHSCOPE_API_KEY" in str(exc)
+        else:
+            raise AssertionError("DashscopeImageProvider should require DASHSCOPE_API_KEY")
+    finally:
+        settings.dashscope_api_key = original_key
+
+
 def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
     calls = {}
     dashscope_module = ModuleType("dashscope")
@@ -132,7 +155,7 @@ def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
     original_base = settings.dashscope_base_http_api_url
     try:
         settings.dashscope_api_key = "test-key"
-        settings.dashscope_base_http_api_url = "https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1"
+        settings.dashscope_base_http_api_url = "https://dashscope.aliyuncs.com/api/v1"
         provider = DashscopeTextProvider()
         result = provider.generate_json(system_prompt="system", user_prompt="user", schema_name="Test")
     finally:
@@ -140,46 +163,65 @@ def test_dashscope_text_provider_uses_multimodal_sdk(monkeypatch):
         settings.dashscope_base_http_api_url = original_base
 
     assert result == {"ok": True}
-    assert dashscope_module.base_http_api_url == "https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1"
+    assert dashscope_module.base_http_api_url == "https://dashscope.aliyuncs.com/api/v1"
     assert calls["kwargs"]["model"] == settings.text_model
     assert calls["kwargs"]["messages"][0]["content"][0]["text"]
 
 
-def test_dashscope_image_provider_uses_image_generation_sdk(monkeypatch, tmp_path: Path):
+def test_dashscope_image_provider_uses_async_http_generation(monkeypatch, tmp_path: Path):
     calls = {}
-    dashscope_module = ModuleType("dashscope")
-    dashscope_module.base_http_api_url = ""
-    image_generation_module = ModuleType("dashscope.aigc.image_generation")
-    response_module = ModuleType("dashscope.api_entities.dashscope_response")
 
-    class FakeImageGeneration:
-        @staticmethod
-        def call(**kwargs):
-            calls["kwargs"] = kwargs
-            return SimpleNamespace(output=SimpleNamespace(results=[{"url": "https://example.com/generated.png"}]))
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.text = str(payload)
 
-    class FakeMessage:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def raise_for_status(self):
+            return None
 
-    image_generation_module.ImageGeneration = FakeImageGeneration
-    response_module.Message = FakeMessage
-    monkeypatch.setitem(sys.modules, "dashscope", dashscope_module)
-    monkeypatch.setitem(sys.modules, "dashscope.aigc", ModuleType("dashscope.aigc"))
-    monkeypatch.setitem(sys.modules, "dashscope.aigc.image_generation", image_generation_module)
-    monkeypatch.setitem(sys.modules, "dashscope.api_entities", ModuleType("dashscope.api_entities"))
-    monkeypatch.setitem(sys.modules, "dashscope.api_entities.dashscope_response", response_module)
+        def json(self):
+            return self.payload
+
+    def fake_post(url, **kwargs):
+        calls["post_url"] = url
+        calls["post_kwargs"] = kwargs
+        return FakeResponse({"output": {"task_status": "PENDING", "task_id": "task-123"}, "request_id": "req-1"})
+
+    def fake_get(url, **kwargs):
+        calls["get_url"] = url
+        calls["get_kwargs"] = kwargs
+        return FakeResponse(
+            {
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {"type": "image", "image": "https://example.com/generated.png"}
+                                ]
+                            }
+                        }
+                    ],
+                },
+                "request_id": "req-2",
+            }
+        )
 
     def fake_download(self, image_url, target):
         target.write_bytes(b"image")
 
+    monkeypatch.setattr("app.providers.dashscope_image_provider.httpx.post", fake_post)
+    monkeypatch.setattr("app.providers.dashscope_image_provider.httpx.get", fake_get)
     monkeypatch.setattr(DashscopeImageProvider, "_download_image", fake_download)
     source = tmp_path / "source.png"
     source.write_bytes(b"source")
 
     original_key = settings.dashscope_api_key
+    original_base = settings.dashscope_image_generation_url
     try:
         settings.dashscope_api_key = "test-key"
+        settings.dashscope_image_generation_url = "https://dashscope.aliyuncs.com/api/v1"
         provider = DashscopeImageProvider()
         results = provider.generate_images(
             project_id=123,
@@ -191,11 +233,25 @@ def test_dashscope_image_provider_uses_image_generation_sdk(monkeypatch, tmp_pat
         )
     finally:
         settings.dashscope_api_key = original_key
+        settings.dashscope_image_generation_url = original_base
 
     assert len(results) == 1
-    assert calls["kwargs"]["model"] == "wan2.7-image-pro"
-    assert calls["kwargs"]["size"] == "2K"
-    assert calls["kwargs"]["messages"][0].kwargs["content"][0]["image"].startswith("file://")
+    assert calls["post_url"] == "https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation"
+    assert calls["post_kwargs"]["headers"]["X-DashScope-Async"] == "enable"
+    assert calls["post_kwargs"]["json"]["model"] == "wan2.7-image-pro"
+    assert calls["post_kwargs"]["json"]["parameters"]["size"] == "2K"
+    content = calls["post_kwargs"]["json"]["input"]["messages"][0]["content"]
+    assert content[0]["image"].startswith("data:image/png;base64,")
+    assert calls["get_url"] == "https://dashscope.aliyuncs.com/api/v1/tasks/task-123"
+
+
+def test_dashscope_image_provider_normalizes_full_generation_endpoint():
+    provider = DashscopeImageProvider()
+
+    assert (
+        provider._base_api_url("https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation")
+        == "https://dashscope.aliyuncs.com/api/v1"
+    )
 
 
 def test_model_connection_test_returns_success_for_mock_provider():
@@ -247,6 +303,43 @@ def test_workflow_records_persistent_agent_event():
     assert {event.step_key for event in events} == {"visual_analysis", "analysis"}
     assert all(event.status == "success" for event in events)
     assert all(event.latency_ms is not None for event in events)
+
+
+def test_visual_analysis_human_review_updates_payload_and_feeds_analysis():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        project = sample_project()
+        project.id = None
+        project.status = "draft"
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+
+        workflow = ProductShotWorkflow(db)
+        visual = workflow.ensure_visual_analysis(project)
+        edited = visual.analysis.model_copy(
+            update={
+                "product_appearance": "人工确认：白色玻璃香薰蜡烛，带金色标签。",
+                "fidelity_constraints": ["保留白色玻璃瓶", "保留金色标签"],
+            }
+        )
+        reviewed = workflow.review_visual_analysis(
+            project,
+            VisualAnalysisReviewRequest(
+                analysis=edited,
+                review_notes="LLM 把金色标签看成黄色贴纸，后续必须按金色标签处理。",
+            ),
+        )
+        analysis = workflow.analyze(project)
+        events = db.query(WorkflowEvent).filter(WorkflowEvent.project_id == project.id).all()
+
+    assert reviewed.analysis.human_reviewed
+    assert "金色标签" in reviewed.analysis.human_review_notes
+    assert "人工确认" in analysis.analysis.visual_summary
+    assert any("人工审核意见" in item for item in analysis.analysis.image_issues)
+    assert "visual_review" in {event.step_key for event in events}
 
 
 def test_plan_stage_creates_three_directions_without_generation_tasks():

@@ -56,6 +56,13 @@ export interface VisualAnalysis {
   background_issues: string[]
   fidelity_constraints: string[]
   marketing_opportunities: string[]
+  human_reviewed: boolean
+  human_review_notes: string
+}
+
+export interface VisualAnalysisReviewRequest {
+  analysis: VisualAnalysis
+  review_notes: string
 }
 
 export interface ProductVisualAnalysisRead {
@@ -282,6 +289,19 @@ export async function uploadAsset(projectId: number, file: File) {
 
 export async function analyzeProject(projectId: number) {
   const { data } = await http.post<ProductAnalysisRead>(`/api/projects/${projectId}/agent/analyze`)
+  return data
+}
+
+export async function ensureVisualAnalysis(projectId: number) {
+  const { data } = await http.post<ProductVisualAnalysisRead>(`/api/projects/${projectId}/agent/visual-analysis`)
+  return data
+}
+
+export async function reviewVisualAnalysis(projectId: number, payload: VisualAnalysisReviewRequest) {
+  const { data } = await http.put<ProductVisualAnalysisRead>(
+    `/api/projects/${projectId}/agent/visual-analysis/review`,
+    payload
+  )
   return data
 }
 

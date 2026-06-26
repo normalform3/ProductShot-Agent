@@ -22,11 +22,13 @@ from app.schemas import (
     ModelSettingsUpdate,
     ProductAnalysisRead,
     ProductAssetRead,
+    ProductVisualAnalysisRead,
     ProjectCreate,
     ProjectDetail,
     ProjectRead,
     RevisionRequest,
     RevisionResponse,
+    VisualAnalysisReviewRequest,
     WorkflowEventRead,
 )
 from app.services import ProductShotWorkflow
@@ -231,6 +233,25 @@ def list_assets(project_id: int, db: Session = Depends(get_db)) -> list[ProductA
 def analyze_project(project_id: int, db: Session = Depends(get_db)) -> ProductAnalysisRead:
     project = get_project_or_404(db, project_id)
     return ProductShotWorkflow(db).analyze(project)
+
+
+@router.post("/projects/{project_id}/agent/visual-analysis", response_model=ProductVisualAnalysisRead)
+def ensure_visual_analysis(project_id: int, db: Session = Depends(get_db)) -> ProductVisualAnalysisRead:
+    project = get_project_or_404(db, project_id)
+    return ProductShotWorkflow(db).ensure_visual_analysis(project)
+
+
+@router.put("/projects/{project_id}/agent/visual-analysis/review", response_model=ProductVisualAnalysisRead)
+def review_visual_analysis(
+    project_id: int,
+    payload: VisualAnalysisReviewRequest,
+    db: Session = Depends(get_db),
+) -> ProductVisualAnalysisRead:
+    project = get_project_or_404(db, project_id)
+    try:
+        return ProductShotWorkflow(db).review_visual_analysis(project, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/projects/{project_id}/agent/generate-plans", response_model=list[CreativePlanRead])

@@ -51,6 +51,8 @@ class ProductAnalysisAgent:
         issues = list(visual.background_issues) if visual else ["原图背景可能分散注意力", "需要进一步突出商品主体"]
         if image_path and "建议在生成图中保持原商品外观和标签一致" not in issues:
             issues.append("建议在生成图中保持原商品外观和标签一致")
+        if visual and visual.human_review_notes:
+            issues.append(f"人工审核意见：{visual.human_review_notes}")
 
         return ProductAnalysisPayload(
             product_type=f"{category}类商品",
@@ -70,7 +72,11 @@ class ProductAnalysisAgent:
                 "最后用平台化文案提升点击和收藏意愿",
             ],
             visual_summary=visual.product_appearance if visual else None,
-            product_consistency_rules=visual.fidelity_constraints if visual else [],
+            product_consistency_rules=(
+                [*visual.fidelity_constraints, f"遵守人工审核意见：{visual.human_review_notes}"]
+                if visual and visual.human_review_notes
+                else (visual.fidelity_constraints if visual else [])
+            ),
             platform_strategy=f"围绕{project.target_platform}首图/封面场景，优先突出商品主体和可信卖点。",
         )
 

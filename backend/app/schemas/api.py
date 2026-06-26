@@ -47,6 +47,13 @@ class VisualAnalysisPayload(BaseModel):
     background_issues: list[str]
     fidelity_constraints: list[str]
     marketing_opportunities: list[str]
+    human_reviewed: bool = False
+    human_review_notes: str = ""
+
+
+class VisualAnalysisReviewRequest(BaseModel):
+    analysis: VisualAnalysisPayload
+    review_notes: str = Field(default="", max_length=2000)
 
 
 class ProductStrategyPayload(BaseModel):

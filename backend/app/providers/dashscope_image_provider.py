@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 from pathlib import Path
+from time import sleep
 from typing import Any
 from uuid import uuid4
 
@@ -18,11 +21,14 @@ class DashscopeImageProvider(MockImageProvider):
     def __init__(self) -> None:
         self.api_key = settings.dashscope_api_key
         self.model = settings.dashscope_image_model
-        self.generation_url = settings.dashscope_image_generation_url
+        self.base_url = self._base_api_url(settings.dashscope_image_generation_url)
+        self.generation_url = f"{self.base_url}/services/aigc/image-generation/generation"
+        self.poll_interval_seconds = 2
+        self.max_poll_attempts = max(1, int(settings.model_request_timeout // self.poll_interval_seconds))
 
     def generate_images(self, **kwargs):
         if not self.api_key:
-            return super().generate_images(**kwargs)
+            raise RuntimeError("DASHSCOPE_API_KEY is required when IMAGE_PROVIDER=dashscope.")
 
         project_id = kwargs["project_id"]
         positive_prompt = kwargs["positive_prompt"]
@@ -74,32 +80,27 @@ class DashscopeImageProvider(MockImageProvider):
         count: int,
         source_image_path: str | None = None,
     ) -> list[str]:
-        try:
-            import dashscope
-            from dashscope.aigc.image_generation import ImageGeneration
-            from dashscope.api_entities.dashscope_response import Message
-        except ImportError as exc:
-            raise RuntimeError("dashscope package is not installed. Run `pip install -r requirements.txt`.") from exc
-
-        dashscope.base_http_api_url = settings.dashscope_base_http_api_url
         prompt_text = f"{positive_prompt}\n\nNegative constraints: {negative_prompt}"
         content = [{"text": prompt_text}]
         source_reference = self._source_image_reference(source_image_path)
         if source_reference:
             content.insert(0, {"image": source_reference})
-        message = Message(role="user", content=content)
 
-        try:
-            response = ImageGeneration.call(
-                model=self.model,
-                api_key=self.api_key,
-                messages=[message],
-                enable_sequential=count > 1,
-                n=count,
-                size=size,
-            )
-        except Exception as exc:
-            raise RuntimeError(f"DashScope image SDK request failed: {exc}") from exc
+        payload = {
+            "model": self.model,
+            "input": {"messages": [{"role": "user", "content": content}]},
+            "parameters": {
+                "enable_sequential": count > 1,
+                "n": count,
+                "size": size,
+                "watermark": False,
+            },
+        }
+        if not source_reference and count == 1:
+            payload["parameters"]["thinking_mode"] = True
+
+        task_id = self._create_task(payload)
+        response = self._poll_task(task_id)
 
         images = self._extract_image_urls(response)
         if not images:
@@ -112,10 +113,82 @@ class DashscopeImageProvider(MockImageProvider):
         path = Path(source_image_path)
         if not path.exists():
             return None
-        return path.resolve().as_uri()
+        mime_type, _ = mimetypes.guess_type(path)
+        if not mime_type or not mime_type.startswith("image/"):
+            raise RuntimeError(f"Unsupported source image type for DashScope: {path.name}")
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    def _base_api_url(self, value: str) -> str:
+        url = value.rstrip("/")
+        for suffix in (
+            "/services/aigc/image-generation/generation",
+            "/services/aigc/multimodal-generation/generation",
+        ):
+            if url.endswith(suffix):
+                return url[: -len(suffix)]
+        return url
+
+    def _create_task(self, payload: dict[str, Any]) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "X-DashScope-Async": "enable",
+        }
+        try:
+            response = httpx.post(
+                self.generation_url,
+                headers=headers,
+                json=payload,
+                timeout=settings.model_request_timeout,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(f"DashScope image task creation failed: {self._dashscope_error(exc.response)}") from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"DashScope image task creation failed: {exc}") from exc
+
+        data = response.json()
+        if self._get(data, "code"):
+            raise RuntimeError(f"DashScope image task creation failed: {self._dashscope_error(data)}")
+        task_id = self._get(self._get(data, "output", default={}), "task_id")
+        if not task_id:
+            raise RuntimeError(f"DashScope image task creation response did not include task_id: {data}")
+        return str(task_id)
+
+    def _poll_task(self, task_id: str) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        url = f"{self.base_url}/tasks/{task_id}"
+        last_data: dict[str, Any] | None = None
+        for _ in range(self.max_poll_attempts):
+            try:
+                response = httpx.get(url, headers=headers, timeout=settings.model_request_timeout)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(f"DashScope image task polling failed: {self._dashscope_error(exc.response)}") from exc
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"DashScope image task polling failed: {exc}") from exc
+
+            data = response.json()
+            last_data = data
+            if self._get(data, "code"):
+                raise RuntimeError(f"DashScope image task polling failed: {self._dashscope_error(data)}")
+
+            output = self._get(data, "output", default={})
+            status = str(self._get(output, "task_status", default="")).upper()
+            if status == "SUCCEEDED":
+                return data
+            if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                message = self._get(data, "message") or self._get(output, "message") or status
+                raise RuntimeError(f"DashScope image task {task_id} ended with {status}: {message}")
+            sleep(self.poll_interval_seconds)
+
+        raise RuntimeError(f"DashScope image task {task_id} did not finish before timeout: {last_data}")
 
     def _extract_image_urls(self, response: Any) -> list[str]:
         data = response if isinstance(response, dict) else getattr(response, "output", None)
+        if self._get(data, "output") is not None:
+            data = self._get(data, "output")
         images: list[str] = []
 
         results = self._get(data, "results", default=[])
@@ -137,6 +210,18 @@ class DashscopeImageProvider(MockImageProvider):
         if isinstance(value, dict):
             return value.get(key, default)
         return getattr(value, key, default)
+
+    def _dashscope_error(self, value: Any) -> str:
+        if isinstance(value, httpx.Response):
+            try:
+                value = value.json()
+            except ValueError:
+                return value.text
+        code = self._get(value, "code")
+        message = self._get(value, "message")
+        request_id = self._get(value, "request_id")
+        parts = [str(item) for item in [code, message, f"request_id={request_id}" if request_id else None] if item]
+        return " | ".join(parts) or str(value)
 
     def _download_image(self, image_url: str, target) -> None:
         try:

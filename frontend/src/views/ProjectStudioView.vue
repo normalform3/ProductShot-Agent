@@ -22,7 +22,7 @@
           <div class="progress-head">
             <div>
               <p class="section-kicker">Agent Progress</p>
-              <h2 class="section-title">正在生成创意方向</h2>
+              <h2 class="section-title">{{ store.progress.title }}</h2>
             </div>
             <span class="metric-pill accent">{{ Math.round(store.progress.percent) }}%</span>
           </div>
@@ -144,15 +144,75 @@
               :loading="runningAnalysis"
               @click="runWorkflow"
             >
-              {{ store.current?.creative_plans.length ? '重新分析并生成方向' : '分析并生成方向' }}
+              {{ analysisActionLabel }}
             </el-button>
           </div>
 
           <el-skeleton v-if="store.loading && hasProject" :rows="5" animated />
+          <template v-else-if="visualReviewPending">
+            <div class="visual-review-panel">
+              <div class="visual-review-head">
+                <div>
+                  <h3>人工审核原图理解</h3>
+                  <p>确认商品外观、材质、可见文字和保真约束后，再继续生成商品策略和创意方向。</p>
+                </div>
+                <span class="metric-pill accent">待确认</span>
+              </div>
+              <el-form class="visual-review-form" label-position="top" @submit.prevent>
+                <el-form-item label="商品外观理解">
+                  <el-input v-model="visualReview.product_appearance" type="textarea" :rows="3" />
+                </el-form-item>
+                <div class="form-grid">
+                  <el-form-item label="主色调">
+                    <el-input v-model="visualReview.dominant_colors" type="textarea" :rows="3" />
+                  </el-form-item>
+                  <el-form-item label="材质">
+                    <el-input v-model="visualReview.materials" type="textarea" :rows="3" />
+                  </el-form-item>
+                </div>
+                <el-form-item label="可见文字 / Logo">
+                  <el-input v-model="visualReview.visible_text_or_logo" type="textarea" :rows="2" />
+                </el-form-item>
+                <el-form-item label="主体清晰度判断">
+                  <el-input v-model="visualReview.subject_clarity" type="textarea" :rows="2" />
+                </el-form-item>
+                <div class="form-grid">
+                  <el-form-item label="原图问题">
+                    <el-input v-model="visualReview.background_issues" type="textarea" :rows="4" />
+                  </el-form-item>
+                  <el-form-item label="保真约束">
+                    <el-input v-model="visualReview.fidelity_constraints" type="textarea" :rows="4" />
+                  </el-form-item>
+                </div>
+                <el-form-item label="营销机会">
+                  <el-input v-model="visualReview.marketing_opportunities" type="textarea" :rows="3" />
+                </el-form-item>
+                <el-form-item label="人工审核意见">
+                  <el-input
+                    v-model="visualReview.review_notes"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="例如：LLM 把金属外壳识别成塑料；Logo 必须保留；不要改变瓶身比例。"
+                  />
+                </el-form-item>
+                <el-button
+                  class="orange-button"
+                  type="primary"
+                  :loading="runningAnalysis"
+                  @click="confirmVisualReview"
+                >
+                  确认审核并生成方向
+                </el-button>
+              </el-form>
+            </div>
+          </template>
           <template v-else-if="store.current?.latest_analysis">
             <div v-if="store.current.visual_analysis" class="visual-summary">
               <h3>原图理解</h3>
               <p>{{ store.current.visual_analysis.analysis.product_appearance }}</p>
+              <p v-if="store.current.visual_analysis.analysis.human_review_notes" class="review-note">
+                人工意见：{{ store.current.visual_analysis.analysis.human_review_notes }}
+              </p>
               <div class="tag-row">
                 <el-tag v-for="item in store.current.visual_analysis.analysis.fidelity_constraints" :key="item">
                   {{ item }}
@@ -182,7 +242,7 @@
               </div>
             </div>
           </template>
-          <el-empty v-else description="创建项目后，先分析原图和商品信息，再生成 3 个创意方向" />
+          <el-empty v-else description="创建项目后，先理解原图并人工确认，再生成 3 个创意方向" />
         </section>
 
         <section class="panel panel-pad studio-section">
@@ -427,6 +487,15 @@
             运行分析
           </el-button>
           <el-button
+            v-else-if="nextAction.kind === 'review'"
+            class="orange-button"
+            type="primary"
+            :loading="runningAnalysis"
+            @click="confirmVisualReview"
+          >
+            确认审核
+          </el-button>
+          <el-button
             v-else-if="nextAction.kind === 'plan'"
             class="orange-button"
             type="primary"
@@ -461,6 +530,7 @@ import {
   markdownExportUrl,
   reviseProject,
   type RevisionResponse,
+  type VisualAnalysis,
   type WorkflowEvent,
   uploadAsset
 } from '../api/productshot'
@@ -480,6 +550,17 @@ const instruction = ref('')
 const revision = ref<RevisionResponse | null>(null)
 const selectedImageId = ref<number | null>(null)
 const selectedPlanId = ref<number | null>(null)
+const visualReview = reactive({
+  product_appearance: '',
+  dominant_colors: '',
+  materials: '',
+  visible_text_or_logo: '',
+  subject_clarity: '',
+  background_issues: '',
+  fidelity_constraints: '',
+  marketing_opportunities: '',
+  review_notes: ''
+})
 
 const form = reactive({
   product_name: '',
@@ -518,9 +599,21 @@ const pageDescription = computed(() =>
     ? '在同一个工作台里完成分析、方案、生成、评分、文案、修改和导出。'
     : '填写商品信息并上传原图，后续 Agent 会沿着同一条生产线连续推进。'
 )
+const visualReviewPending = computed(
+  () => Boolean(store.current?.visual_analysis && !store.current.latest_analysis && !store.current.visual_analysis.analysis.human_reviewed)
+)
+const analysisActionLabel = computed(() => {
+  if (!store.current?.visual_analysis) return '理解原图'
+  if (visualReviewPending.value) return '确认审核并生成方向'
+  if (store.current?.creative_plans.length) return '重新分析并生成方向'
+  return '生成商品策略和方向'
+})
 const nextAction = computed(() => {
+  if (visualReviewPending.value) {
+    return { kind: 'review', title: '先确认原图理解', description: '检查并修正 LLM 对商品外观、材质、文字和保真约束的判断。' }
+  }
   if (!store.current?.latest_analysis) {
-    return { kind: 'analysis', title: '先理解商品', description: '分析原图和商品信息后，系统会先给出 3 个方向。' }
+    return { kind: 'analysis', title: '先理解原图', description: '完成原图理解后，需要人工确认再继续规划方向。' }
   }
   if (!filteredImages.value.length) {
     return { kind: 'plan', title: '选择方向生成', description: '从 3 个方向里挑一个，再生成该方向的图片、评分和文案。' }
@@ -539,6 +632,13 @@ watch(
   }
 )
 
+watch(
+  () => store.current?.visual_analysis?.id,
+  () => {
+    syncVisualReviewForm()
+  }
+)
+
 async function loadFromRoute() {
   revision.value = null
   instruction.value = ''
@@ -552,6 +652,7 @@ async function loadFromRoute() {
   selectedFile.value = null
   try {
     await store.load(projectId.value)
+    syncVisualReviewForm()
     const recommended = store.current?.generated_images.find((image) => image.is_recommended)
     selectedPlanId.value = recommended?.plan_id || store.current?.generated_images[0]?.plan_id || null
     selectedImageId.value = recommended?.id || store.current?.generated_images[0]?.id || null
@@ -591,10 +692,35 @@ async function createStudioProject() {
 
 async function runWorkflow() {
   if (!hasProject.value) return
+  if (visualReviewPending.value) {
+    await confirmVisualReview()
+    return
+  }
   runningAnalysis.value = true
   try {
-    await store.runAnalysisAndPlans(projectId.value)
-    ElMessage.success('分析与创意方案已生成')
+    if (!store.current?.visual_analysis) {
+      await store.runVisualAnalysis(projectId.value)
+      ElMessage.success('原图理解已完成，请审核后继续')
+      return
+    }
+    await confirmVisualReview()
+  } catch (error) {
+    store.setStep('analysis', 'failed')
+    ElMessage.error(errorMessage(error))
+  } finally {
+    runningAnalysis.value = false
+  }
+}
+
+async function confirmVisualReview() {
+  if (!hasProject.value || !store.current?.visual_analysis) return
+  runningAnalysis.value = true
+  try {
+    await store.continueAfterVisualReview(projectId.value, {
+      analysis: visualReviewPayload(store.current.visual_analysis.analysis),
+      review_notes: visualReview.review_notes.trim()
+    })
+    ElMessage.success('审核已确认，创意方案已生成')
   } catch (error) {
     store.setStep('analysis', 'failed')
     ElMessage.error(errorMessage(error))
@@ -693,6 +819,47 @@ function eventDetailText(event: WorkflowEvent) {
     return event.detail_json
   }
 }
+
+function syncVisualReviewForm() {
+  const analysis = store.current?.visual_analysis?.analysis
+  if (!analysis) return
+  visualReview.product_appearance = analysis.product_appearance
+  visualReview.dominant_colors = listToLines(analysis.dominant_colors)
+  visualReview.materials = listToLines(analysis.materials)
+  visualReview.visible_text_or_logo = listToLines(analysis.visible_text_or_logo)
+  visualReview.subject_clarity = analysis.subject_clarity
+  visualReview.background_issues = listToLines(analysis.background_issues)
+  visualReview.fidelity_constraints = listToLines(analysis.fidelity_constraints)
+  visualReview.marketing_opportunities = listToLines(analysis.marketing_opportunities)
+  visualReview.review_notes = analysis.human_review_notes || ''
+}
+
+function visualReviewPayload(current: VisualAnalysis): VisualAnalysis {
+  return {
+    ...current,
+    product_appearance: visualReview.product_appearance.trim(),
+    dominant_colors: linesToList(visualReview.dominant_colors),
+    materials: linesToList(visualReview.materials),
+    visible_text_or_logo: linesToList(visualReview.visible_text_or_logo),
+    subject_clarity: visualReview.subject_clarity.trim(),
+    background_issues: linesToList(visualReview.background_issues),
+    fidelity_constraints: linesToList(visualReview.fidelity_constraints),
+    marketing_opportunities: linesToList(visualReview.marketing_opportunities),
+    human_reviewed: true,
+    human_review_notes: visualReview.review_notes.trim()
+  }
+}
+
+function listToLines(items: string[]) {
+  return items.join('\n')
+}
+
+function linesToList(value: string) {
+  return value
+    .split('\n')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
 </script>
 
 <style scoped>
@@ -757,7 +924,7 @@ function eventDetailText(event: WorkflowEvent) {
 
 .progress-items {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
 }
 
@@ -891,6 +1058,34 @@ dd {
   border: 1px solid rgba(36, 88, 70, 0.14);
   border-radius: var(--ps-radius);
   background: var(--ps-surface-soft);
+}
+
+.visual-review-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.visual-review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(201, 93, 66, 0.22);
+  border-radius: var(--ps-radius);
+  background: var(--ps-surface-soft);
+}
+
+.visual-review-head p,
+.review-note {
+  margin: 6px 0 0;
+  color: var(--ps-muted);
+  line-height: 1.6;
+}
+
+.visual-review-form {
+  display: grid;
+  gap: 2px;
 }
 
 .visual-summary p {

@@ -18,7 +18,7 @@ class Settings:
     dashscope_workspace_id = os.getenv("DASHSCOPE_WORKSPACE_ID")
     dashscope_base_http_api_url = os.getenv(
         "DASHSCOPE_BASE_HTTP_API_URL",
-        os.getenv("DASHSCOPE_TEXT_BASE_URL", "https://ws-k524juxb6rhpyhlp.cn-beijing.maas.aliyuncs.com/api/v1"),
+        os.getenv("DASHSCOPE_TEXT_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"),
     )
     dashscope_text_base_url = dashscope_base_http_api_url
     dashscope_image_model = os.getenv("DASHSCOPE_IMAGE_MODEL", "wan2.7-image-pro")
